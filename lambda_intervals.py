@@ -1,3 +1,6 @@
+### this is an old idea that didn't work I'll move it somewhere else later
+
+
 import os
 
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
