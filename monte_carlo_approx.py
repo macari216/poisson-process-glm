@@ -62,7 +62,9 @@ n_basis_funcs = 5
 
 np.random.seed(123)
 
+# model parameters
 weights = jnp.array(0.01 * np.random.randn(n_neurons*n_basis_funcs)).reshape(n_neurons,n_basis_funcs)
+bias = jnp.array(-5 + np.random.randn()) # don't forget to add this later
 
 # full dataset
 tot_spikes = np.sort(np.random.uniform(0, tot_time_sec, size=tot_spikes_n))
@@ -86,32 +88,35 @@ assert jnp.all(tot_spikes_new[update_idx]==neu_spikes)
 
 # first term
 # this works
-# +b nado escho vsunut'
 lam_y = 0
 for idx in update_idx:
     dts = tot_spikes_new[idx-max_window: idx] - tot_spikes_new[idx]
     lam_y += jnp.log(jax.nn.softplus(sum_basis_and_dot(weights[neuron_ids_new[idx-max_window: idx]], dts, history_window, n_basis_funcs)))
 
-# this does not work
-# I also don't think it's a better option than lax.scan because it will return
-# an array with cumulative sum instead of scalar sum
-# assoc_scan_fun = lambda x, y: jnp.add(sum_basis_and_dot(weights, lax.dynamic_slice_in_dim(tot_spikes_new, x-max_window, max_window)),
-#                             sum_basis_and_dot(weights, lax.dynamic_slice_in_dim(tot_spikes_new, y-max_window, max_window)))
-#
-# lam_sum = lax.associative_scan(assoc_scan_fun, update_idx)
-#
-#
-# # this also does not work
-# def scan_func(lam_sum, idx):
-#     spk_in_w = lax.dynamic_slice_in_dim(tot_spikes_new, idx-max_window,max_window)
-#     neu_in_w = lax.dynamic_slice_in_dim(neuron_ids_new, idx-max_window,max_window)
-#     spike = lax.dynamic_slice_in_dim(tot_spikes_new, idx,1)
-#     dts = spk_in_w - spike
-#
-#     update = sum_basis_and_dot(weights[neu_in_w], dts, history_window, n_basis_funcs)
-#     return lam_sum + jnp.log(jax.nn.softplus(update)), None
-#
-# lam_y, _ = lax.scan(scan_func, 0, update_idx)
+########
+@partial(jax.jit, static_argnums=2)
+def slice_array(array, i, window_size=10):
+    return jax.lax.dynamic_slice(array, (i - window_size,), (window_size,))
+
+slice_vmap = jax.vmap(slice_array, in_axes=(None, 0), out_axes=0)
+
+def scan_fn(carry, i):
+    lam_s, spk_times, neu_ids, ws = carry
+    out = slice_array(spk_times, i, max_window)
+    dts = out - jax.lax.dynamic_slice(spk_times, (i,), (1,))
+    idxs = slice_array(neu_ids, i, max_window)
+    ll = jnp.log(jax.nn.softplus(
+        sum_basis_and_dot(ws[idxs], dts, history_window, n_basis_funcs))
+    )
+    lam_s = lam_s + jnp.sum(ll)
+    return (lam_s, spk_times, neu_ids, ws), None
+
+max_window = int(max_window)
+
+with jax.disable_jit(False):
+    out, _ = jax.lax.scan(scan_fn, (jnp.array(0), tot_spikes_new, neuron_ids_new, weights), update_idx)
+
+print(np.allclose(out[0], lam_y))
 
 # Monte Carlo estimate
 # draw M random samples
