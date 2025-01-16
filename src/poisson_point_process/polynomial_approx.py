@@ -70,7 +70,7 @@ def run_scan_fn_k(
             posts_spikes, (post,), (1,)
         )
 
-        ll = raised_cosine_log_eval(jnp.abs(dts), history_window, n_basis_funcs)
+        ll = raised_cosine_log_eval(-jnp.abs(dts), history_window, n_basis_funcs)
 
         lam_s += jnp.sum(ll)
         return jnp.sum(lam_s), None
