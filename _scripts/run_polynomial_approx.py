@@ -1,12 +1,18 @@
-import nemos as nmo
 import jax
-import numpy as np
 import jax.numpy as jnp
-from scipy.integrate import simpson
-from poisson_point_process import raised_cosine_log_eval
-from poisson_point_process.utils import tot_spk_in_window
-from poisson_point_process.polynomial_approx import precompute_Phi_x, run_scan_fn_M,compute_chebyshev, run_scan_fn_k
+import nemos as nmo
+import numpy as np
 import pynapple as nap
+from scipy.integrate import simpson
+
+from poisson_point_process import raised_cosine_log_eval
+from poisson_point_process.polynomial_approx import (
+    compute_chebyshev,
+    precompute_Phi_x,
+    run_scan_fn_k,
+    run_scan_fn_M,
+)
+from poisson_point_process.utils import tot_spk_in_window
 
 ### mainf
 
@@ -82,7 +88,16 @@ M = run_scan_fn_M(x, Phi_x, pres_spikes_new, max_window, delta_idx, n_pres_spike
 #         jnp.arange(n_posts_spikes),
 #     )
 # ).T
-k = run_scan_fn_k(pres_spikes, n_posts_spikes, delta_idx, posts_spikes, pres_spikes_new, max_window, history_window, n_basis_funcs)
+k = run_scan_fn_k(
+    pres_spikes,
+    n_posts_spikes,
+    delta_idx,
+    posts_spikes,
+    pres_spikes_new,
+    max_window,
+    history_window,
+    n_basis_funcs,
+)
 
 # compute coefficients
 bounds = [-2, 2]

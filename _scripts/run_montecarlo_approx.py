@@ -9,9 +9,7 @@ from poisson_point_process import (
     compute_unnormalized_log_likelihood,
     raised_cosine_log_eval,
 )
-from poisson_point_process.monte_carlo_approx import (
-    sum_basis_and_dot,
-)
+from poisson_point_process.monte_carlo_approx import sum_basis_and_dot
 from poisson_point_process.utils import tot_spk_in_window
 
 jax.config.update("jax_enable_x64", True)
