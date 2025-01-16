@@ -72,22 +72,16 @@ Phi_x = precompute_Phi_x(x, window_size, n_basis_funcs, history_window)
 M = run_scan_fn_M(x, Phi_x, pres_spikes_new, max_window, delta_idx, n_pres_spikes)
 
 # ## test for scan (it works)
-# M_loop = np.zeros((n_basis_funcs, n_basis_funcs))
-# for idx in range(delta_idx, n_pres_spikes+delta_idx):
-#     dts = pres_spikes_new[idx-max_window: idx] - pres_spikes_new[idx]
-#     dts_idx = jnp.argmin(jnp.abs(x[None,:] - jnp.abs(dts[:,None])), axis=1)
-#     cross_prod_sum = jnp.sum(Phi_x[dts_idx],axis=0)
-#     M_loop = M_loop + Phi_x[0] + 2*cross_prod_sum
-#
-# print(jnp.allclose(M_loop,M))
+M_loop = np.zeros((n_basis_funcs, n_basis_funcs))
+for idx in range(delta_idx, n_pres_spikes + delta_idx):
+    dts = pres_spikes_new[idx - max_window : idx] - pres_spikes_new[idx]
+    dts_idx = jnp.argmin(jnp.abs(x[None, :] - jnp.abs(dts[:, None])), axis=1)
+    cross_prod_sum = jnp.sum(Phi_x[dts_idx], axis=0)
+    M_loop = M_loop + Phi_x[0] + 2 * cross_prod_sum
+
+print(jnp.allclose(M_loop, M))
 
 # # k event cumulative contributions
-# k_scan_idx = jnp.vstack(
-#     (
-#         jnp.searchsorted(pres_spikes, posts_spikes, "right") + delta_idx,
-#         jnp.arange(n_posts_spikes),
-#     )
-# ).T
 k = run_scan_fn_k(
     pres_spikes,
     n_posts_spikes,
