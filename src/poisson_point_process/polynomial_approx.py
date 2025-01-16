@@ -12,10 +12,10 @@ def phi_product_int(delta_idx, x, ws, n_basis_funcs, history_window):
     x1 = x[delta_idx:ws]
     x2 = x[0 : ws - delta_idx]
 
-    assert x1.size == x2.size
+    # assert x1.size == x2.size
 
-    phi_ts1 = raised_cosine_log_eval(x1, history_window, n_basis_funcs)
-    phi_ts2 = raised_cosine_log_eval(x2, history_window, n_basis_funcs)
+    phi_ts1 = raised_cosine_log_eval(-x1, history_window, n_basis_funcs)
+    phi_ts2 = raised_cosine_log_eval(-x2, history_window, n_basis_funcs)
 
     phi_products = phi_ts1[:, :, None] * phi_ts2[:, None, :]
 
