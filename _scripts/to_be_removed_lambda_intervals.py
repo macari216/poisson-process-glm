@@ -1,18 +1,21 @@
 ### this is an old idea that didn't work I'll move it somewhere else later
 
-
-import os
-
-os.environ["JAX_PLATFORM_NAME"] = "cpu"
-
-from time import perf_counter
-import scipy.io as sio
 import numpy as np
 import jax
 import jax.numpy as jnp
-import nemos as nmo
 import pynapple as nap
+import numpy as np
+import scipy.io as sio
+import pynapple as nap
+import nemos as nmo
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
+from time import perf_counter
+import jax
+
+
+import os
+
 
 def poisson_nll(predicted_rate, spike_indices, binsize):
     lambda_st = jnp.array([sum(predicted_rate[spike_indices[k], k]) for k in range(predicted_rate.shape[1])])
@@ -31,6 +34,75 @@ def update_lambda(lambda_hat, d_lams, all_k_indices):
 
     return lambda_hat
 
+def compute_lam_k(spikes_k):
+    delta = nap.IntervalSet(t_k - ws_sec, t_k)
+    S_delta = spikes_tsd.restrict(delta)
+    taus = jnp.round(t_k - S_delta.t).astype(int)
+    lam_k = jnp.sum(jnp.log(inverse_link_fun(d_lams[S_delta.d, taus, k])))
+    return lam_k
+
+
+def comp_tau(y_k,t_k,binsize=0.0001):
+    return jnp.floor((y_k - t_k) / binsize).astype(int)
+
+
+@jax.jit
+def comp_lam_yk(log_lambda, spikes, y_times, n_indices, ws_sec):
+    for y_k in spikes:
+        delta_mask = (y_times >= y_k - ws_sec) & (y_times < y_k)
+        S_delta = jnp.where(delta_mask)[0]
+        S_delta_t = jnp.take(y_times, S_delta)
+        S_delta_n = jnp.take(n_indices, S_delta)
+
+        y_k_sum = sum(jnp.dot(basis_taus[comp_tau(y_k,t_k)], w[i, :, n]) for t_k, i
+                      in zip(S_delta_t, S_delta_n))
+
+        log_lambda = log_lambda.at[0].add(jnp.log(inverse_link_fun(y_k_sum)))
+
+        return log_lambda
+
+
+
+def compute_intervals_and_mappings(spikes_array, ws_sec):
+    spike_times = np.concatenate([spikes for spikes in spikes_array]).squeeze()
+    spike_indices = np.concatenate(
+        [np.tile(k, len(spikes_array[k])) for k in range(spikes_array.shape[0])]).squeeze()
+    sorted_indices = np.argsort(spike_times)
+    spike_times = spike_times[sorted_indices]
+    spike_indices = spike_indices[sorted_indices]
+
+    merged_intervals = []
+    spike_mappings = {}
+
+    current_start = spike_times[0]
+    current_end = (current_start + ws_sec)
+
+    interval_spikes = [[] for _ in range(spikes_array.shape[0])]
+    interval_spikes[spike_indices[0]].append(current_start)
+
+    for idx, spike_time in enumerate(spike_times[1:]):
+        if spike_time <= current_end:
+            k = spike_indices[idx]
+            interval_spikes[k].append(spike_time)
+            current_end = max(current_end, spike_time + ws_sec)
+        else:
+            merged_intervals.append((float(current_start), float(current_end)))
+            interval_spikes = [np.array(interval_spikes[k]) for k in range(len(interval_spikes))]
+            spike_mappings[merged_intervals[-1]] = interval_spikes
+            interval_spikes = [[] for _ in range(spikes_array.shape[0])]
+            k = spike_indices[idx]
+            interval_spikes[k].append(spike_time)
+            current_start = spike_time
+            current_end = spike_time + ws_sec
+    merged_intervals.append((float(current_start), float(current_end)))
+    interval_spikes = [np.array(interval_spikes[k]) for k in range(len(interval_spikes))]
+    spike_mappings[merged_intervals[-1]] = interval_spikes
+
+    return merged_intervals, spike_mappings
+
+
+
+os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
 # load data
 # basis_gp = np.load('/mnt/home/amedvedeva/ceph/songbird_data/gp_basis.npz', allow_pickle=True)
@@ -158,12 +230,7 @@ for k in range(n_neurons):
                     )
 
 
-def compute_lam_k(spikes_k):
-    delta = nap.IntervalSet(t_k - ws_sec, t_k)
-    S_delta = spikes_tsd.restrict(delta)
-    taus = jnp.round(t_k - S_delta.t).astype(int)
-    lam_k = jnp.sum(jnp.log(inverse_link_fun(d_lams[S_delta.d, taus, k])))
-    return lam_k
+
 t0 = perf_counter()
 d_lams = jnp.stack([jnp.dot(kernels, w_hat[i]) for i in range(n_neurons)])
 lam_k = jnp.zeros(n_neurons)
@@ -197,8 +264,7 @@ time, basis_taus = basis_rc.evaluate_on_grid(ws)
 
 # compute the fist logl term for each postsynaptic neuron
 # for each postsynaptic neuron, sum_yk(log(softplus(sum_tk(w dot phi(yk-tk)))))
-def comp_tau(y_k,t_k,binsize=0.0001):
-    return jnp.floor((y_k - t_k) / binsize).astype(int)
+
 
 log_lambda_n = jnp.zeros(n_neurons)
 for n in range(n_neurons):
@@ -212,20 +278,6 @@ for n in range(n_neurons):
 
 ###########
 
-@jax.jit
-def comp_lam_yk(log_lambda, spikes, y_times, n_indices, ws_sec):
-    for y_k in spikes:
-        delta_mask = (y_times >= y_k - ws_sec) & (y_times < y_k)
-        S_delta = jnp.where(delta_mask)[0]
-        S_delta_t = jnp.take(y_times, S_delta)
-        S_delta_n = jnp.take(n_indices, S_delta)
-
-        y_k_sum = sum(jnp.dot(basis_taus[comp_tau(y_k,t_k)], w[i, :, n]) for t_k, i
-                      in zip(S_delta_t, S_delta_n))
-
-        log_lambda = log_lambda.at[0].add(jnp.log(inverse_link_fun(y_k_sum)))
-
-        return log_lambda
 
 
 
@@ -235,43 +287,6 @@ for n in range(n_neurons):
     log_lambda_n = log_lambda_n.at[n].add(comp_lam_yk(jnp.zeros(1), spikes_n, y_times, n_indices, ws_sec))
 
 
-
-def compute_intervals_and_mappings(spikes_array, ws_sec):
-    spike_times = np.concatenate([spikes for spikes in spikes_array]).squeeze()
-    spike_indices = np.concatenate(
-        [np.tile(k, len(spikes_array[k])) for k in range(spikes_array.shape[0])]).squeeze()
-    sorted_indices = np.argsort(spike_times)
-    spike_times = spike_times[sorted_indices]
-    spike_indices = spike_indices[sorted_indices]
-
-    merged_intervals = []
-    spike_mappings = {}
-
-    current_start = spike_times[0]
-    current_end = (current_start + ws_sec)
-
-    interval_spikes = [[] for _ in range(spikes_array.shape[0])]
-    interval_spikes[spike_indices[0]].append(current_start)
-
-    for idx, spike_time in enumerate(spike_times[1:]):
-        if spike_time <= current_end:
-            k = spike_indices[idx]
-            interval_spikes[k].append(spike_time)
-            current_end = max(current_end, spike_time + ws_sec)
-        else:
-            merged_intervals.append((float(current_start), float(current_end)))
-            interval_spikes = [np.array(interval_spikes[k]) for k in range(len(interval_spikes))]
-            spike_mappings[merged_intervals[-1]] = interval_spikes
-            interval_spikes = [[] for _ in range(spikes_array.shape[0])]
-            k = spike_indices[idx]
-            interval_spikes[k].append(spike_time)
-            current_start = spike_time
-            current_end = spike_time + ws_sec
-    merged_intervals.append((float(current_start), float(current_end)))
-    interval_spikes = [np.array(interval_spikes[k]) for k in range(len(interval_spikes))]
-    spike_mappings[merged_intervals[-1]] = interval_spikes
-
-    return merged_intervals, spike_mappings
 
 # spikes_quiet_sorted = np.load('/Users/amedvedeva/Simons Foundation Dropbox/Arina Medvedeva/glm_songbirds/songbirds_data/spikes_quiet_adj.npy', allow_pickle=True)
 spikes_quiet_sorted = sio.loadmat('/Users/amedvedeva/Simons Foundation Dropbox/Arina Medvedeva/glm_songbirds/songbirds_data/c57SpikeTimesQuiet.mat')['c57SpikeTimesQuiet'].squeeze()
