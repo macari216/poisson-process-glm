@@ -1,8 +1,9 @@
 import jax
 import jax.numpy as jnp
 from scipy.integrate import simpson
-from .utils import tot_spk_in_window, slice_array
+
 from .basis import raised_cosine_log_eval
+from .utils import slice_array
 
 
 def phi_product_int(delta_idx, x, ws, n_basis_funcs, history_window):
@@ -52,7 +53,16 @@ def run_scan_fn_M(x, Phi_x, pres_spikes_new, max_window, delta_idx, n_pres_spike
     return M
 
 
-def run_scan_fn_k(pres_spikes, n_posts_spikes, delta_idx, posts_spikes, pres_spikes_new, max_window, history_window, n_basis_funcs):
+def run_scan_fn_k(
+    pres_spikes,
+    n_posts_spikes,
+    delta_idx,
+    posts_spikes,
+    pres_spikes_new,
+    max_window,
+    history_window,
+    n_basis_funcs,
+):
 
     def scan_fn_k(lam_s, i):
         pre, post = i
@@ -88,4 +98,3 @@ def compute_chebyshev(f, xlim, power=2, dx=0.01):
     fx = f(xx)
     what_cheby = jnp.linalg.lstsq(Bx.T @ Dx @ Bx, Bx.T @ Dx @ fx, rcond=None)[0]
     return what_cheby
-

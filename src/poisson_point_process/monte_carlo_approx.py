@@ -3,7 +3,9 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 import numpy as np
-from.utils import slice_array
+
+from .utils import slice_array
+
 
 @partial(jax.jit, static_argnums=(2,))
 def sum_basis_and_dot(weights, dts, basis_fn):
