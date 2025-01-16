@@ -14,6 +14,7 @@ from poisson_point_process.polynomial_approx import (
 )
 from poisson_point_process.utils import tot_spk_in_window
 
+jax.config.update("jax_enable_x64", True)
 ### mainf
 
 # generate data
@@ -53,7 +54,7 @@ x = jnp.linspace(0, history_window, window_size)
 # m linear cumulative contributions
 # m = n_pres_spikes * raised_cosine_log_eval(x, history_window, n_basis_funcs).sum(0)
 m = n_pres_spikes * simpson(
-    raised_cosine_log_eval(x, history_window, n_basis_funcs), x=x, axis=0
+    raised_cosine_log_eval(-x, history_window, n_basis_funcs), x=x, axis=0
 )
 
 # M interaction matrix
