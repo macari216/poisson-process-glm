@@ -136,29 +136,29 @@ print(np.round(perf_counter()-t0,5))
 print(lam_y)
 print(np.allclose(jnp.sum(out), lam_y))
 
-# Monte Carlo estimate
-# draw M random samples
-M = neu_spikes.size
-s_m = np.random.choice(tot_spikes[tot_spikes>history_window], size=M)
-epsilon_m = np.random.uniform(0, history_window, size=M)
-tau_m = s_m + epsilon_m
-
-#compute bounds for history window
-mc_window = tot_spk_in_window(jnp.array([-history_window,0]), tau_m, tot_spikes)
-mc_idx = jnp.searchsorted(tot_spikes, tau_m,'right')
-
-print(f"mc window: {mc_window}")
-
-delta_mc = jnp.full(-mc_idx.size % n_batches_scan, delta_idx)
-mc_idx = np.hstack((mc_idx, delta_mc))
-mc_idx_array = mc_idx.reshape(mc_idx.size//n_batches_scan,-1)
-
-# compute 1/M sum_M lambda(tau_m)
-mc_sum, _ = scan_vmap(mc_idx_array)
-sub, _ = scan_vmap(delta_mc[:,None])
-
-mc_estimate = (jnp.sum(mc_sum) - jnp.sum(sub)) / M
-
-loss = mc_estimate - lam_y
-
-print(loss)
+# # Monte Carlo estimate
+# # draw M random samples
+# M = neu_spikes.size
+# s_m = np.random.choice(tot_spikes[tot_spikes>history_window], size=M)
+# epsilon_m = np.random.uniform(0, history_window, size=M)
+# tau_m = s_m + epsilon_m
+#
+# #compute bounds for history window
+# mc_window = tot_spk_in_window(jnp.array([-history_window,0]), tau_m, tot_spikes)
+# mc_idx = jnp.searchsorted(tot_spikes, tau_m,'right')
+#
+# print(f"mc window: {mc_window}")
+#
+# delta_mc = jnp.full(-mc_idx.size % n_batches_scan, delta_idx)
+# mc_idx = np.hstack((mc_idx, delta_mc))
+# mc_idx_array = mc_idx.reshape(mc_idx.size//n_batches_scan,-1)
+#
+# # compute 1/M sum_M lambda(tau_m)
+# mc_sum, _ = scan_vmap(mc_idx_array)
+# sub, _ = scan_vmap(delta_mc[:,None])
+#
+# mc_estimate = (jnp.sum(mc_sum) - jnp.sum(sub)) / M
+#
+# loss = mc_estimate - lam_y
+#
+# print(loss)
