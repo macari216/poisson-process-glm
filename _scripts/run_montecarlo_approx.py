@@ -5,125 +5,114 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from poisson_point_process import (
-    compute_unnormalized_log_likelihood,
-    raised_cosine_log_eval,
-)
-from poisson_point_process.monte_carlo_approx import sum_basis_and_dot
-from poisson_point_process.utils import tot_spk_in_window
+from poisson_point_process.monte_carlo_approx import sum_basis_and_dot, compute_summed_ll
+from poisson_point_process import utils
+from poisson_point_process.basis import raised_cosine_log_eval
 
 jax.config.update("jax_enable_x64", True)
-
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
+
 # generate data
 n_neurons = 10
+target_neu_id = 0
 spk_hz = 200
 tot_time_sec = 60
 tot_spikes_n = int(tot_time_sec * spk_hz * n_neurons)
 history_window = 0.1
 n_basis_funcs = 5
+n_batches_scan = 5
 print(f"total spikes: {tot_spikes_n}")
 
 np.random.seed(123)
+
+# generate uniform spikes
+spike_times_concat = np.sort(np.random.uniform(0, tot_time_sec, size=tot_spikes_n))
+spike_id_concat = np.random.choice(n_neurons, size=len(spike_times_concat))
+all_spikes = jnp.vstack((spike_times_concat,spike_id_concat)).T
+spike_idx_target = jnp.arange(len(spike_times_concat))[spike_id_concat == target_neu_id]
+spike_times_target = spike_times_concat[spike_idx_target]
+y_spikes = jnp.vstack((spike_times_target, spike_idx_target)).T
+
+# compute scan window and adjust indices
+max_window, tot_spikes_new, neuron_ids_new, shifted_idx = \
+    utils.compute_max_window_and_adjust(
+        spike_times_concat,
+        spike_id_concat,
+        history_window,
+        spike_times_target,
+        spike_idx_target
+    )
 
 # model parameters
 weights = jnp.array(0.01 * np.random.randn(n_neurons * n_basis_funcs)).reshape(
     n_neurons, n_basis_funcs
 )
 bias = jnp.array(np.random.randn())
-
-# full dataset
-spike_times_concat = np.sort(np.random.uniform(0, tot_time_sec, size=tot_spikes_n))
-spike_id_concat = np.random.choice(n_neurons, size=len(spike_times_concat))
-
-# postsynaptic neuron
-target_neu_id = 0
-neu_spk_idx = jnp.arange(len(spike_times_concat))[spike_id_concat == target_neu_id]
-spike_times_neuron = spike_times_concat[neu_spk_idx]
-
-# define max window and adjust indices
-max_window = tot_spk_in_window(
-    jnp.array([-history_window, 0]), spike_times_neuron, spike_times_concat
-)
-max_window = int(max_window)
-print(f"max window: {max_window}")
-
-delta_idx = jax.nn.relu(max_window - neu_spk_idx[0])
-shifted_idx = neu_spk_idx + delta_idx
-tot_spikes_new = np.hstack(
-    (jnp.full(delta_idx, -history_window - 1), spike_times_concat)
-)
-neuron_ids_new = np.hstack((jnp.full(delta_idx, 0), spike_id_concat))
-
-assert jnp.all(tot_spikes_new[shifted_idx] == spike_times_neuron)
-
-n_batches_scan = 10
-shifted_idx = np.hstack(
-    (shifted_idx, jnp.full(-shifted_idx.size % n_batches_scan, delta_idx))
-)
-update_idx_array = shifted_idx.reshape(shifted_idx.size // n_batches_scan, -1)
+params = (weights,bias)
 
 basis_fn = lambda delta_ts: raised_cosine_log_eval(
     delta_ts, history_window, n_basis_funcs, width=2, time_scaling=50
 )
 
-# first term
-# this works
-lam_y = 0
+#### first term
+lam_y_loop = 0
 for idx in shifted_idx:
-    dts = tot_spikes_new[idx - max_window : idx] - tot_spikes_new[idx]
-    w_idxs = neuron_ids_new[idx - max_window : idx]
-    lam_y += jnp.log(
+    dts = tot_spikes_new[idx - max_window : idx+1] - tot_spikes_new[idx]
+    w_idxs = neuron_ids_new[idx - max_window : idx+1]
+    lam_y_loop += jnp.log(
         jax.nn.softplus(sum_basis_and_dot(weights[w_idxs], dts, basis_fn) + bias)
     )
 
 ########
 t0 = perf_counter()
-out, scan_vmapped = compute_unnormalized_log_likelihood(
-    weights,
-    bias,
-    spike_times_concat.copy(),
-    spike_id_concat,
-    neu_spk_idx,
-    history_window,
+log_lam_y = compute_summed_ll(
+    tot_spikes_new.copy(),
+    neuron_ids_new,
+    shifted_idx,
+    n_batches_scan,
     max_window,
+    params,
     basis_fn=basis_fn,
-    n_batches_scan=10,
     inverse_link=jax.nn.softplus,
+    log=True
 )
 
-print(jnp.sum(out))
+print(log_lam_y)
 print(np.round(perf_counter() - t0, 5))
-print(lam_y)
-print(np.allclose(jnp.sum(out), lam_y))
+print(lam_y_loop)
+print(np.allclose(jnp.sum(log_lam_y), lam_y_loop))
 
 # Monte Carlo estimate
 # draw M random samples
-M = spike_times_neuron.size
-s_m = np.random.choice(spike_times_concat[spike_times_concat > history_window], size=M)
+M = spike_times_target.size
+s_m = np.random.choice(spike_times_concat[spike_times_concat<=tot_time_sec-history_window], size=M)
 epsilon_m = np.random.uniform(0, history_window, size=M)
 tau_m = s_m + epsilon_m
+tau_m_idx = jnp.searchsorted(spike_times_concat, tau_m, "right")
 
-# compute bounds for history window
-mc_window = tot_spk_in_window(
-    jnp.array([-history_window, 0]), tau_m, spike_times_concat
+mc_window, tot_spikes_new, neuron_ids_new, shifted_mc_idx = \
+    utils.compute_max_window_and_adjust(
+        spike_times_concat,
+        spike_id_concat,
+        history_window,
+        tau_m,
+        tau_m_idx
+    )
+
+mc_sum = compute_summed_ll(
+    tot_spikes_new.copy(),
+    neuron_ids_new,
+    shifted_mc_idx,
+    n_batches_scan,
+    mc_window,
+    params,
+    basis_fn=basis_fn,
+    inverse_link=jax.nn.softplus,
+    log=False
 )
-mc_idx = jnp.searchsorted(spike_times_concat, tau_m, "right")
 
+mc_estimate = mc_sum / M
 
-print(f"mc window: {mc_window}")
+neg_ll = mc_estimate - log_lam_y
 
-delta_mc = jnp.full(-mc_idx.size % n_batches_scan, delta_idx)
-mc_idx = np.hstack((mc_idx, delta_mc))
-mc_idx_array = mc_idx.reshape(mc_idx.size // n_batches_scan, -1)
-
-
-# compute 1/M sum_M lambda(tau_m)
-mc_sum, _ = scan_vmapped(mc_idx_array)
-sub, _ = scan_vmapped(delta_mc[:, None])
-
-mc_estimate = (jnp.sum(mc_sum) - jnp.sum(sub)) / M
-
-loss = mc_estimate - lam_y
-
-print(loss)
+print(neg_ll)
