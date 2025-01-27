@@ -81,11 +81,11 @@ def data_ll(X_spikes, y_spikes, history_window, params, n_batches_scan, basis_fn
 
 
 def norm_mc_approx(X_spikes, M, history_window, params, n_batches_scan, basis_fn, inverse_link):
-    s_m = np.random.choice(X_spikes[X_spikes[:, 0] < X_spikes[-1, 0] - history_window, 0], size=M)
+    s_m = np.random.choice(X_spikes[0, X_spikes[0] < X_spikes[0, -1] - history_window], size=M)
     epsilon_m = np.random.uniform(0, history_window, size=M)
     tau_m = s_m + epsilon_m
-    tau_m_idx = jnp.searchsorted(X_spikes[:,0], tau_m, "right")
-    mc_spikes = jnp.vstack((tau_m, tau_m_idx)).T
+    tau_m_idx = jnp.searchsorted(X_spikes[0], tau_m, "right")
+    mc_spikes = jnp.vstack((tau_m, tau_m_idx))
 
     mc_window, X_spikes_new, shifted_mc_idx = \
         compute_max_window_and_adjust(
