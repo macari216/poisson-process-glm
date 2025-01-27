@@ -40,11 +40,14 @@ def compute_summed_ll(
 
     # body of the scan function
     def scan_fn(lam_s, i):
-        dts = slice_array(
+        spk_in_window = slice_array(
             X_spikes, i + 1, max_window_size + 1
-        ) - jax.lax.dynamic_slice(X_spikes, (0, i), (2, 1))
+        )
+
+        dts = spk_in_window[0] - jax.lax.dynamic_slice(X_spikes, (0, i), (1, 1))
+
         ll = optional_log(
-            linear_non_linear(dts[0], weights[dts[1].astype(int)], bias, basis_fn, jnp.exp)
+            linear_non_linear(dts[0], weights[spk_in_window[1].astype(int)], bias, basis_fn, inverse_link)
         )
         lam_s += jnp.sum(ll)
         return jnp.sum(lam_s), None
@@ -106,6 +109,6 @@ def norm_mc_approx(X_spikes, M, history_window, params, n_batches_scan, basis_fn
 
 def negative_log_likelihood(X_spikes, y_spikes, history_window, params, n_batches_scan, basis_fn, inverse_link):
     log_lam_y = data_ll(X_spikes, y_spikes, history_window, params, n_batches_scan, basis_fn, inverse_link)
-    mc_estimate = norm_mc_approx(X_spikes, y_spikes.size, history_window, params, n_batches_scan, basis_fn, inverse_link)
+    mc_estimate = norm_mc_approx(X_spikes, y_spikes.shape[1], history_window, params, n_batches_scan, basis_fn, inverse_link)
 
     return mc_estimate - log_lam_y
