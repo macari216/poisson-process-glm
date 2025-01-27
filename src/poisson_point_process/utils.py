@@ -16,24 +16,24 @@ def tot_spk_in_window(bounds, spike_times, all_spikes):
 
 @partial(jax.jit, static_argnums=2)
 def slice_array(array, i, window_size):
-    return jax.lax.dynamic_slice(array, (i - window_size,), (window_size,))
+    return jax.lax.dynamic_slice(array, (0,i - window_size), (2,window_size,))
 
-def compute_max_window_and_adjust(spike_times, neuron_ids, history_window, target_times, target_idx):
+def compute_max_window_and_adjust(X_spikes, history_window, y_spikes):
     max_window = tot_spk_in_window(
-        jnp.array([-history_window, 0]), target_times, spike_times
+        jnp.array([-history_window, 0]), y_spikes[0], X_spikes[0]
     )
     max_window = int(max_window)
 
-    delta_idx = jax.nn.relu(max_window - target_idx[0])
-    shifted_idx = target_idx + delta_idx
-    tot_spikes_new = jnp.hstack(
-        (jnp.full(delta_idx, -history_window - 1), spike_times)
-    )
-    neuron_ids_new = jnp.hstack((jnp.full(delta_idx, 0), neuron_ids))
+    delta_idx = jax.nn.relu(max_window - y_spikes[1,0].astype(int))
+    shifted_idx = y_spikes[1].astype(int) + delta_idx
 
-    assert jnp.all(tot_spikes_new[shifted_idx] == spike_times[target_idx])
+    shift = jnp.vstack((jnp.full(delta_idx, -history_window - 1), jnp.full(delta_idx, 0)))
 
-    return max_window, tot_spikes_new, neuron_ids_new, shifted_idx
+    X_spikes_new = jnp.hstack((shift, X_spikes))
+
+    assert jnp.all(X_spikes_new[0,shifted_idx] == X_spikes[0, y_spikes[1].astype(int)])
+
+    return max_window, X_spikes_new, shifted_idx
 
 
 def reshape_for_vmap(spike_idx, n_batches_scan):

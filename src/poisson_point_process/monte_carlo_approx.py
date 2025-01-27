@@ -20,8 +20,7 @@ def linear_non_linear(dts, weights, bias, basis_fn, inverse_link=jax.nn.softplus
     return ll
 
 def compute_summed_ll(
-    spike_times_concat,
-    spike_id_concat,
+    X_spikes,
     shifted_idx,
     n_batches_scan,
     max_window_size,
@@ -42,11 +41,10 @@ def compute_summed_ll(
     # body of the scan function
     def scan_fn(lam_s, i):
         dts = slice_array(
-            spike_times_concat, i+1, max_window_size+1
-        ) - jax.lax.dynamic_slice(spike_times_concat, (i,), (1,))
-        idxs = slice_array(spike_id_concat, i+1, max_window_size+1)
+            X_spikes, i + 1, max_window_size + 1
+        ) - jax.lax.dynamic_slice(X_spikes, (0, i), (2, 1))
         ll = optional_log(
-            linear_non_linear(dts, weights[idxs], bias, basis_fn, inverse_link)
+            linear_non_linear(dts[0], weights[dts[1].astype(int)], bias, basis_fn, jnp.exp)
         )
         lam_s += jnp.sum(ll)
         return jnp.sum(lam_s), None
@@ -55,3 +53,59 @@ def compute_summed_ll(
     out, _ = scan_vmap(shifted_idx_array)
     sub, _ = scan_vmap(padding[:,None])
     return jnp.sum(out) - jnp.sum(sub)
+
+
+def data_ll(X_spikes, y_spikes, history_window, params, n_batches_scan, basis_fn, inverse_link):
+    max_window, X_spikes_new, shifted_idx = \
+        compute_max_window_and_adjust(
+            X_spikes,
+            history_window,
+            y_spikes
+        )
+
+    log_lam_y = compute_summed_ll(
+        X_spikes_new.copy(),
+        shifted_idx,
+        n_batches_scan,
+        max_window,
+        params,
+        basis_fn=basis_fn,
+        inverse_link=inverse_link,
+        log=True
+    )
+
+    return log_lam_y
+
+
+def norm_mc_approx(X_spikes, M, history_window, params, n_batches_scan, basis_fn, inverse_link):
+    s_m = np.random.choice(X_spikes[X_spikes[:, 0] < X_spikes[-1, 0] - history_window, 0], size=M)
+    epsilon_m = np.random.uniform(0, history_window, size=M)
+    tau_m = s_m + epsilon_m
+    tau_m_idx = jnp.searchsorted(X_spikes[:,0], tau_m, "right")
+    mc_spikes = jnp.vstack((tau_m, tau_m_idx)).T
+
+    mc_window, X_spikes_new, shifted_mc_idx = \
+        compute_max_window_and_adjust(
+            X_spikes,
+            history_window,
+            mc_spikes
+        )
+
+    mc_sum = compute_summed_ll(
+        X_spikes_new,
+        shifted_mc_idx,
+        n_batches_scan,
+        mc_window,
+        params,
+        basis_fn=basis_fn,
+        inverse_link=inverse_link,
+        log=False
+    )
+
+    return mc_sum / M
+
+def negative_log_likelihood(X_spikes, y_spikes, history_window, params, n_batches_scan, basis_fn, inverse_link):
+    log_lam_y = data_ll(X_spikes, y_spikes, history_window, params, n_batches_scan, basis_fn, inverse_link)
+    mc_estimate = norm_mc_approx(X_spikes, y_spikes.size, history_window, params, n_batches_scan, basis_fn, inverse_link)
+
+    return mc_estimate - log_lam_y
