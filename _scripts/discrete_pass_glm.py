@@ -1,14 +1,15 @@
 import os
 
-import jax.nn
-
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
 from time import perf_counter
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
+
+from poisson_point_process import simulate
 
 import nemos as nmo
 import pynapple as nap
@@ -120,7 +121,7 @@ n_neurons = 10
 posts_n = 0
 spk_per_sec = 10
 history_window = 0.3
-tot_time_sec = 1000+history_window
+tot_time_sec = 100+history_window
 tot_spikes_n = int(tot_time_sec * spk_per_sec * n_neurons)
 binsize = 0.01
 window_size = int(history_window / binsize)
@@ -138,12 +139,17 @@ time, kernels = rc_basis.evaluate_on_grid(window_size)
 time *= history_window
 
 # set inverse link
-f = np.exp
-# f = softplus
+# f = np.exp
+# inv_link = jnp.exp
+f = softplus
+inv_link = jax.nn.softplus
 
+# all-to-one connectivity (weights only)
+weights_true, X, y =  generate_poisson_counts(spk_per_sec, binsize, n_bins_tot, n_neurons, n_basis_funcs, window_size, rc_basis)
+
+# uniform (bias only)
 # spike_times = generate_spike_times(tot_time_sec, tot_spikes_n, n_neurons)
 # X, y = times_to_counts(spike_times, rc_basis)
-weights_true, X, y =  generate_poisson_counts(spk_per_sec, binsize, n_bins_tot, n_neurons, n_basis_funcs, window_size, rc_basis)
 
 # X_bias = np.concatenate((np.ones([X.shape[0],1]),X),axis=1)
 # Xs = X_bias[:test_size]
@@ -154,7 +160,7 @@ suff = batched_sufficient_stats(X, y, n_batches)
 
 
 # model params
-bounds = [[-20,20], [-15,15],[-25,25],[-10,10]]
+bounds = [[-5,20], [-5,25],[-1,15],[-1,25]]
 mean_fr = np.log(y.sum() / y.shape[0])
 nonlin_center = [
     np.array([
@@ -172,8 +178,6 @@ weights, interval = paglm.fit_paglm(f, suff, binsize, nonlin_center, Xs, ys)
 print(f"optimal interval: {interval[0]-mean_fr, interval[1]-mean_fr}")
 
 # in nemos
-inv_link = jnp.exp
-# inv_link = jax.nn.softplus
 obs_model = nmo.observation_models.PoissonObservations(inv_link)
 model = nmo.glm.GLM(solver_name="LBFGS",observation_model=obs_model).fit(X,y)
 

@@ -12,7 +12,7 @@ from poisson_point_process.polynomial_approx import (
     run_scan_fn_k,
     run_scan_fn_M,
 )
-from poisson_point_process.utils import tot_spk_in_window
+from poisson_point_process.utils import compute_max_window_size
 
 jax.config.update("jax_enable_x64", True)
 ### mainf
@@ -58,7 +58,7 @@ m = n_pres_spikes * simpson(
 )
 
 # M interaction matrix
-max_window = tot_spk_in_window(jnp.array([-history_window, 0]), tot_spikes, tot_spikes)
+max_window = compute_max_window_size(jnp.array([-history_window, 0]), tot_spikes, tot_spikes)
 max_window = int(max_window)
 
 delta_idx = jax.nn.relu(max_window - pres_spk_idx[0])
