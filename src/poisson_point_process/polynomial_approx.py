@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from scipy.integrate import simpson
 
 from .basis import raised_cosine_log_eval
-from .utils import slice_array
+from .utils import reshape_for_vmap, slice_array
 
 
 def phi_product_int(delta_idx, x, ws, n_basis_funcs, history_window):
@@ -34,55 +34,96 @@ def precompute_Phi_x(x, ws, n_basis_funcs, history_window):
     return jnp.stack(M_x)
 
 
-def run_scan_fn_M(x, Phi_x, pres_spikes_new, max_window, delta_idx, n_pres_spikes):
+def compute_M_blocks(
+        max_window,
+        n_basis_funcs,
+        n_batches_scan,
+        x,
+        Phi_x,
+        tot_spikes,
+        pairs,
+        ):
+    def compute_Mn(x, Phi_x, tot_spikes, pair):
+        def valid_idx(M_scan, idx):
+            spk_in_window = slice_array(
+                tot_spikes, idx + 1, max_window + 1
+            )
+            dts = spk_in_window[0] - jax.lax.dynamic_slice(tot_spikes, (0, idx), (1, 1))
+            dts_valid = jnp.where(spk_in_window[1] == pair[0], dts, invalid_dts)
+            dts_idx = jnp.argmin(jnp.abs(x[None, :] - jnp.abs(dts_valid.T)), axis=1)
+            cross_prod_sum = jnp.sum(Phi_x[dts_idx], axis=0)
+            M_scan = M_scan + Phi_x[0] + 2 * cross_prod_sum
+            return M_scan
+        def invalid_idx(M_scan, idx):
+            M_scan += jnp.zeros((n_basis_funcs, n_basis_funcs))
+            return M_scan
+        def scan_fn(M_scan, idx):
+            M_scan = jax.lax.cond(idx > len(tot_spikes[0]), invalid_idx, valid_idx, M_scan, idx)
+            return M_scan, None
 
-    def scan_fn_M(M_sum, i):
-        dts = slice_array(pres_spikes_new, i, max_window) - jax.lax.dynamic_slice(
-            pres_spikes_new, (i,), (1,)
-        )
-        dts_idx = jnp.argmin(jnp.abs(x[None, :] - jnp.abs(dts[:, None])), axis=1)
-        cross_prod_sum = jnp.sum(Phi_x[dts_idx], axis=0)
+        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.zeros((n_basis_funcs, n_basis_funcs)), idxs))
 
-        M_sum = M_sum + Phi_x[0] + 2 * cross_prod_sum
+        post_idx = jnp.nonzero(tot_spikes[1] == pair[1], size=len(tot_spikes[0]), fill_value=len(tot_spikes[0]) + 5)[0]
+        post_idx_array, padding = reshape_for_vmap(post_idx, n_batches_scan)
+        invalid_dts = jnp.tile(x[-1]+1, max_window+1)
+        out, _ = scan_vmap(post_idx_array)
+        sub, _ = scan_vmap(padding[:, None])
 
-        return M_sum, None
+        return jnp.sum(out,0) - jnp.sum(sub,0)
 
-    M, _ = jax.lax.scan(
-        scan_fn_M, jnp.zeros((5, 5)), jnp.arange(delta_idx, n_pres_spikes + delta_idx)
-    )
-    return M
+    compute_Mn_vmap = jax.vmap(lambda pair: compute_Mn(x, Phi_x, tot_spikes, pair))
 
+    return compute_Mn_vmap(pairs)
+
+@jax.jit
+def construct_M(M_self, M_cross):
+    def insert_diag(n, matrix):
+        i_start = n * J
+        block = jax.lax.dynamic_slice_in_dim(M_self, n, 1, 0)[0]
+        return jax.lax.dynamic_update_slice(matrix, block, (i_start, i_start))
+    def insert_off_diag(idx, matrix):
+        row = jax.lax.div(idx, N - 1)
+        col = jax.lax.rem(idx, N - 1) + 1 + row
+        i_start, j_start = row * J, col * J
+        block = jax.lax.dynamic_slice(M_cross, (idx, 0, 0), (1, J, J)).squeeze(0)
+        matrix = jax.lax.dynamic_update_slice(matrix, block, (i_start, j_start))
+        matrix = jax.lax.dynamic_update_slice(matrix, block, (j_start, i_start))
+        return matrix
+    N, J = M_self.shape[0], M_self.shape[1]
+    M_full = jnp.zeros((N*J, N*J))
+    upper = (N * (N - 1)) // 2
+    M_full = jax.lax.fori_loop(0, N, insert_diag, M_full)
+    M_full = jax.lax.fori_loop(0, upper, insert_off_diag, M_full)
+    return M_full
 
 def run_scan_fn_k(
-    pres_spikes,
-    n_posts_spikes,
-    delta_idx,
-    posts_spikes,
-    pres_spikes_new,
-    max_window,
-    history_window,
-    n_basis_funcs,
+        tot_spikes,
+        target_idx,
+        max_window,
+        basis_fn,
+        n_batches_scan,
+        k_init,
 ):
 
-    def scan_fn_k(lam_s, i):
-        pre, post = i
-        dts = slice_array(pres_spikes_new, pre, max_window) - jax.lax.dynamic_slice(
-            posts_spikes, (post,), (1,)
+    def scan_k(k_sum, i):
+        spk_in_window = slice_array(
+            tot_spikes, i + 1, max_window + 1
         )
+        dts = spk_in_window[0] - jax.lax.dynamic_slice(tot_spikes, (0, i), (1, 1))
+        eval = basis_fn(dts[0])
+        print(dts[0].shape)
+        print(eval.shape)
 
-        ll = raised_cosine_log_eval(-jnp.abs(dts), history_window, n_basis_funcs)
+        k_sum = k_sum.at[spk_in_window[1].astype(int)].add(eval)
 
-        lam_s += jnp.sum(ll)
-        return jnp.sum(lam_s), None
+        return k_sum, None
 
-    k_scan_idx = jnp.vstack(
-        (
-            jnp.searchsorted(pres_spikes, posts_spikes, "right") + delta_idx,
-            jnp.arange(n_posts_spikes),
-        )
-    ).T
-    k, _ = jax.lax.scan(scan_fn_k, jnp.array(0), k_scan_idx)
-    return k
+    scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_k, k_init, idxs))
+    target_idx_array, padding = reshape_for_vmap(target_idx, n_batches_scan)
+    k, _ = scan_vmap(target_idx_array)
+    sub, _ = scan_vmap(padding[:, None])
+
+    return jnp.sum(k,0).flatten() - jnp.sum(sub,0).flatten()
 
 
 def compute_chebyshev(f, xlim, power=2, dx=0.01):
