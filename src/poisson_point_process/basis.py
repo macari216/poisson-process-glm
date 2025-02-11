@@ -3,6 +3,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
+jax.config.update("jax_enable_x64", True)
 
 @partial(jax.jit, static_argnums=(1, 2, 3, 4))
 def raised_cosine_log_eval(x, ws, n_basis_funcs, width=2.0, time_scaling=50.0):

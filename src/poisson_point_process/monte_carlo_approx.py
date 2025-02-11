@@ -6,7 +6,6 @@ import numpy as np
 
 from .utils import slice_array, reshape_for_vmap, adjust_indices_and_spike_times
 
-
 @partial(jax.jit, static_argnums=(2,))
 def sum_basis_and_dot(weights, dts, basis_fn):
     """compilable linear-non-linear transform"""
@@ -38,10 +37,7 @@ def compute_summed_ll(
     inverse_link=jax.nn.softplus,
     log=True
 ):
-    if log:
-        optional_log = jnp.log
-    else:
-        optional_log = lambda x: x
+    optional_log = jnp.log if log else lambda x: x
 
     weights, bias = params
 

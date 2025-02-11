@@ -2,8 +2,7 @@
 from __future__ import annotations
 
 import warnings
-from functools import wraps
-from typing import Any, Callable, Literal, NamedTuple, Optional, Tuple, Union
+from typing import Any, Callable, NamedTuple, Optional, Tuple, Union
 from numpy.typing import ArrayLike
 
 import jax
@@ -11,7 +10,6 @@ import jax.numpy as jnp
 import jaxopt
 from functools import partial
 
-import poisson_point_process.poisson_process_obs as obs
 from .basis import raised_cosine_log_eval
 from .utils import adjust_indices_and_spike_times, reshape_for_vmap, slice_array
 from .base_regressor import BaseRegressor
@@ -175,17 +173,17 @@ class ContinuousGLM(BaseRegressor):
     def sum_basis_and_dot(self, weights, dts):
         """compilable linear-non-linear transform"""
         fx = raised_cosine_log_eval(dts, self.history_window, self.n_basis_funcs)
-        return jnp.sum(fx * weights)
+        return jnp.sum(fx * weights, axis=1)
 
     def linear_non_linear(self, dts, weights, bias):
-        ll = self.inverse_link_function((self.sum_basis_and_dot(weights, dts) + bias))
+        ll = self.inverse_link_function(self.sum_basis_and_dot(weights, dts) + bias)
         return ll
 
     def draw_mc_sample(self, X, M, random_key):
         """draw sample for a Monte-Carlo estimate of /int_0^T(lambda(t))dt"""
         keys = jax.random.split(random_key, 2)
         valid_spikes = X[0, :-self.max_window]
-        s_m = jax.random.choice(keys[0], valid_spikes, shape=(M,), replace=False)
+        s_m = jax.random.choice(keys[0], valid_spikes, shape=(M,), replace=True)
         epsilon_m = jax.random.uniform(keys[1], shape=(M,), minval=0.0, maxval=self.history_window)
         tau_m = s_m + epsilon_m
         tau_m_idx = jnp.searchsorted(X[0], tau_m, "right")
@@ -196,7 +194,7 @@ class ContinuousGLM(BaseRegressor):
     def compute_summed_ll(
             self,
             X,
-            shifted_idx,
+            y,
             params,
             log=True
     ):
@@ -205,7 +203,7 @@ class ContinuousGLM(BaseRegressor):
         weights, bias = params
         weights = weights.reshape(-1, self.n_basis_funcs)
 
-        shifted_idx_array, padding = reshape_for_vmap(shifted_idx, self.n_batches_scan)
+        shifted_idx_array, padding = reshape_for_vmap(y[1].astype(int), self.n_batches_scan)
 
         # body of the scan function
         def scan_fn(lam_s, i):
@@ -224,34 +222,27 @@ class ContinuousGLM(BaseRegressor):
         scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.array(0), idxs))
         out, _ = scan_vmap(shifted_idx_array)
         sub, _ = scan_vmap(padding[:, None])
+        # return (jnp.sum(out) - jnp.sum(sub)) / y.shape[1]
         return jnp.sum(out) - jnp.sum(sub)
 
-    def compute_log_likelihood_term(self, X, y, params, optional_log=True):
-        X_spikes_new, shifted_idx = \
-            adjust_indices_and_spike_times(
-                X,
-                y,
-                self.history_window,
-                self.max_window
-            )
-
-        summed_ll = self.compute_summed_ll(
-            X_spikes_new,
-            shifted_idx,
+    def _negative_log_likelihood(
+            self, X, y, params, random_key,
+    ):
+        log_lam_y = self.compute_summed_ll(
+            X,
+            y,
             params,
-            log=optional_log
+            log=True
         )
 
-        return summed_ll
-
-    def _negative_log_likelihood(
-            self, y, X, params, random_key,
-    ):
-        log_lam_y = self.compute_log_likelihood_term(X, y, params, optional_log=True)
-
-        M = y.shape[1] * 2
+        M = y.shape[1]
         mc_samples = self.draw_mc_sample(X, M, random_key)
-        mc_estimate = self.compute_log_likelihood_term(X, mc_samples, params, optional_log=False)
+        mc_estimate = self.compute_summed_ll(
+            X,
+            mc_samples,
+            params,
+            log=False
+        )
 
         self.predicted_rate = mc_estimate / M
 
@@ -268,7 +259,7 @@ class ContinuousGLM(BaseRegressor):
 
         random_key, subkey = jax.random.split(random_key)
 
-        neg_ll = self._negative_log_likelihood(y, X, params, subkey)
+        neg_ll = self._negative_log_likelihood(X, y, params, subkey)
 
         return neg_ll, random_key
 
@@ -293,7 +284,6 @@ class ContinuousGLM(BaseRegressor):
         analytical_inv = INVERSE_FUNCS.get(inverse_link_function, None)
 
         out = analytical_inv(y.shape[1] / int(jnp.ceil(y[0, -1])))
-        print(out)
 
         return jnp.array([out,])
 
@@ -378,6 +368,9 @@ class ContinuousGLM(BaseRegressor):
         init_params: Optional[Tuple[Union[dict, ArrayLike], ArrayLike]] = None,
     ):
         """Fit the model to neural activity."""
+        #add max window padding to X and y
+        X, y = adjust_indices_and_spike_times(X, y, self.history_window, self.max_window)
+
         init_params = self.initialize_params(X, y, init_params=init_params)
 
         self.initialize_state(X, y, init_params)
@@ -408,6 +401,10 @@ class ContinuousGLM(BaseRegressor):
             **kwargs,
     ) -> jaxopt.OptStep:
         """Run a single update step of the jaxopt solver."""
+
+        #add max window padding to X and y
+        X, y = adjust_indices_and_spike_times(X, y, self.history_window, self.max_window)
+
         # perform a one-step update
         opt_step = self._solver_update(params, opt_state, self.random_key, X, y, *args, **kwargs)
 
