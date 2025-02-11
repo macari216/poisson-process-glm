@@ -3,9 +3,8 @@ import jax.numpy as jnp
 import numpy as np
 import pynapple as nap
 import nemos as nmo
-from time import perf_counter
 
-def generate_spike_times_uniform(tot_time_sec, tot_spikes_n, n_neurons, seed=216):
+def spike_times_uniform(tot_time_sec, tot_spikes_n, n_neurons, seed=216):
     np.random.seed(seed)
     tot_spikes = np.sort(np.random.uniform(0, tot_time_sec, size=tot_spikes_n))
     neuron_ids = np.random.choice(n_neurons, size=len(tot_spikes))
@@ -22,30 +21,40 @@ def times_to_xy(spikes, basis, posts_n, binsize, window_size):
 
     return X, y
 
-def generate_poisson_counts(mean_per_sec, binsize, n_bins_tot, n_pres, n_basis_funcs, ws, basis, nonlin, seed=216):
+def poisson_counts(mean_per_sec, bias_per_sec, binsize, n_bins_tot, n_pres, weights_true, ws, basis, nonlin, seed=216):
+    if mean_per_sec < 0 or bias_per_sec < 0:
+        raise ValueError(
+            "Rate must be non-negative"
+        )
+
+    n_bins_tot += ws
+
     np.random.seed(seed)
     lam_pres = np.abs(np.random.normal(mean_per_sec, mean_per_sec/10, n_pres))
+    bias_posts = bias_per_sec + np.log(binsize)
+
+    weights_true = jnp.array(weights_true)
+    bias_posts = jnp.array(bias_posts)
 
     rate_per_bin = lam_pres * binsize
-    weights_true = np.random.normal(0, 1, n_pres * n_basis_funcs)
     pres_spikes = jnp.array(np.random.poisson(lam=rate_per_bin, size=(n_bins_tot, n_pres)))
     X = basis.compute_features(pres_spikes)
     X = X[ws:]
-    lam_posts = nonlin(np.dot(X, weights_true))
-    y = jnp.array(np.random.poisson(lam=lam_posts, size=len(lam_posts)))
+    lam_posts = nonlin(np.dot(X, weights_true) + bias_posts)
+    posts_spikes = jnp.array(np.random.poisson(lam=lam_posts, size=len(lam_posts)))
 
-    return weights_true, X, pres_spikes, y
+    return X, posts_spikes, pres_spikes[ws:], lam_posts
 
-def generate_poisson_counts_recurrent(tot_time_sec, binsize, n_neurons, basis_kernels, params, init_spikes, inv_link):
+def poisson_counts_recurrent(n_bins_tot, n_neurons, window_size, basis_kernels, params, inv_link):
     # parameters for simulator
-    n_bins_tot = int(tot_time_sec / binsize)
     feedforward_input = np.zeros((n_bins_tot, n_neurons, 1))
     feedforward_coef = np.zeros((n_neurons, 1))
+    init_spikes = np.zeros((window_size, n_neurons))
     random_key = jax.random.key(123)
     coefs, intercepts = params
 
     # generate poisson firing rates per bin
-    spikes, _ = nmo.simulation.simulate_recurrent(coupling_coef = coefs,
+    spikes, firing_rates = nmo.simulation.simulate_recurrent(coupling_coef = coefs,
                                                  feedforward_coef = feedforward_coef,
                                                  intercepts = intercepts,
                                                  random_key = random_key,
@@ -56,9 +65,9 @@ def generate_poisson_counts_recurrent(tot_time_sec, binsize, n_neurons, basis_ke
 
     )
 
-    return spikes
+    return spikes, firing_rates
 
-def generate_poisson_times(counts, tot_time_sec, binsize, random_key=jax.random.PRNGKey(0)):
+def poisson_times(counts, tot_time_sec, binsize, random_key=jax.random.PRNGKey(0)):
     """generate poisson process spike times
     since the counts are provided, we assume spike times
     are uniformly distributed within bins (memoryless property of poisson process)"""
@@ -75,7 +84,8 @@ def generate_poisson_times(counts, tot_time_sec, binsize, random_key=jax.random.
     )
 
     spike_times = repeated_bins + random_offsets
-    neuron_indices = jnp.repeat(jnp.arange(n_neurons), counts.sum(0))
+    neuron_ids = jnp.tile(jnp.arange(n_neurons), n_bins_tot)
+    neuron_indices = jnp.repeat(neuron_ids, counts.flatten())
 
     #sort by time
     sorted_indices = jnp.argsort(spike_times)
