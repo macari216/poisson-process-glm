@@ -21,7 +21,7 @@ from nemos.typing import DESIGN_INPUT_TYPE
 
 ModelParams = Tuple[jnp.ndarray, jnp.ndarray]
 
-class ContinuousGLM(BaseRegressor):
+class ContinuousMC(BaseRegressor):
     def __init__(
         self,
         obs_model_kwargs: dict,
@@ -44,13 +44,15 @@ class ContinuousGLM(BaseRegressor):
         self.scale_ = None
         self.dof_resid_ = None
 
-        # required to cmpute neg ll - no separate observation model class
+        # required to compute neg ll - no separate observation model class
         self.n_basis_funcs = obs_model_kwargs["n_basis_funcs"]
         self.n_batches_scan = obs_model_kwargs["n_batches_scan"]
         self.max_window = obs_model_kwargs["max_window"]
         self.history_window = obs_model_kwargs["history_window"]
-        self.random_key = obs_model_kwargs["mc_random_key"]
         self.inverse_link_function = obs_model_kwargs["inverse_link_function"]
+        self.random_key = obs_model_kwargs["mc_random_key"]
+        self.M = int(obs_model_kwargs["mc_n_samples"])
+        self.T = 1000
 
     @staticmethod
     def _check_params(
@@ -186,7 +188,7 @@ class ContinuousGLM(BaseRegressor):
         s_m = jax.random.choice(keys[0], valid_spikes, shape=(M,), replace=True)
         epsilon_m = jax.random.uniform(keys[1], shape=(M,), minval=0.0, maxval=self.history_window)
         tau_m = s_m + epsilon_m
-        tau_m_idx = jnp.searchsorted(X[0], tau_m, "right")
+        tau_m_idx = jnp.searchsorted(X[0], tau_m, "right")-1
         mc_spikes = jnp.vstack((tau_m, tau_m_idx))
 
         return mc_spikes
@@ -202,27 +204,29 @@ class ContinuousGLM(BaseRegressor):
 
         weights, bias = params
         weights = weights.reshape(-1, self.n_basis_funcs)
+        # weights = jnp.vstack((jnp.zeros(self.n_basis_funcs), weights))
 
-        shifted_idx_array, padding = reshape_for_vmap(y[1].astype(int), self.n_batches_scan)
+        shifted_spikes_array, padding = reshape_for_vmap(y, self.n_batches_scan)
 
         # body of the scan function
         def scan_fn(lam_s, i):
             spk_in_window = slice_array(
-                X, i + 1, self.max_window + 1
+                X, i[1].astype(int) + 1, self.max_window + 1
             )
 
-            dts = spk_in_window[0] - jax.lax.dynamic_slice(X, (0, i), (1, 1))
+            dts = spk_in_window[0] - i[0]
 
             ll = optional_log(
-                self.linear_non_linear(dts[0], weights[spk_in_window[1].astype(int)], bias)
+                self.linear_non_linear(dts, weights[spk_in_window[1].astype(int)], bias)
             )
+            # jax.debug.print("i: {}", i)
+            # jax.debug.print("ll: {}", ll)
             lam_s += jnp.sum(ll)
-            return jnp.sum(lam_s), None
+            return lam_s, None
 
         scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.array(0), idxs))
-        out, _ = scan_vmap(shifted_idx_array)
-        sub, _ = scan_vmap(padding[:, None])
-        # return (jnp.sum(out) - jnp.sum(sub)) / y.shape[1]
+        out, _ = scan_vmap(shifted_spikes_array)
+        sub, _ = scan_vmap(padding[None,:])
         return jnp.sum(out) - jnp.sum(sub)
 
     def _negative_log_likelihood(
@@ -235,8 +239,7 @@ class ContinuousGLM(BaseRegressor):
             log=True
         )
 
-        M = y.shape[1]
-        mc_samples = self.draw_mc_sample(X, M, random_key)
+        mc_samples = self.draw_mc_sample(X, self.M, random_key)
         mc_estimate = self.compute_summed_ll(
             X,
             mc_samples,
@@ -244,9 +247,9 @@ class ContinuousGLM(BaseRegressor):
             log=False
         )
 
-        self.predicted_rate = mc_estimate / M
+        estimated_rate = (self.T/self.M) * mc_estimate
 
-        return self.predicted_rate - log_lam_y
+        return estimated_rate - log_lam_y
 
     def _predict_and_compute_loss(
         self,
@@ -371,6 +374,8 @@ class ContinuousGLM(BaseRegressor):
         #add max window padding to X and y
         X, y = adjust_indices_and_spike_times(X, y, self.history_window, self.max_window)
 
+        self.T = jnp.ceil(X[0, -1])
+
         init_params = self.initialize_params(X, y, init_params=init_params)
 
         self.initialize_state(X, y, init_params)
@@ -404,6 +409,8 @@ class ContinuousGLM(BaseRegressor):
 
         #add max window padding to X and y
         X, y = adjust_indices_and_spike_times(X, y, self.history_window, self.max_window)
+
+        self.T = int(jnp.ceil(X[0, -1]))
 
         # perform a one-step update
         opt_step = self._solver_update(params, opt_state, self.random_key, X, y, *args, **kwargs)

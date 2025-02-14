@@ -29,11 +29,12 @@ def adjust_indices_and_spike_times(X, y, history_window, max_window):
     return shifted_X, shifted_y
 
 @partial(jax.jit, static_argnums=1)
-def reshape_for_vmap(spike_idx, n_batches_scan):
-    padding = jnp.full(-spike_idx.size % n_batches_scan, spike_idx[0])
-    shifted_idx = jnp.hstack(
-        (spike_idx, padding)
+def reshape_for_vmap(spikes, n_batches_scan):
+    padding_shape = (-spikes.shape[1] % n_batches_scan,)
+    padding = jnp.full((spikes.shape[0],) + padding_shape, spikes[:, :1])
+    shifted_spikes = jnp.hstack(
+        (spikes, padding)
     )
-    shifted_idx_array = shifted_idx.reshape(shifted_idx.size // n_batches_scan, -1)
+    shifted_spikes_array = shifted_spikes.reshape(n_batches_scan, spikes.shape[0], -1).transpose(0,2,1)
 
-    return shifted_idx_array, padding
+    return shifted_spikes_array, padding.transpose(1,0)
