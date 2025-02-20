@@ -57,6 +57,7 @@ cumulative_intensity = lambda t, l0, ws: l0*t + ws * (t // (2 * ws)) + jax.nn.re
 
 
 plt.plot(time, intensity(time, l0, ws))
+plt.xlim(0,55)
 plt.show()
 approx = simpson(intensity(time, l0, ws), x=time)
 true = cumulative_intensity(time[-1], l0, ws)
