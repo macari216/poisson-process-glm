@@ -1,9 +1,11 @@
+from copy import deepcopy
 from functools import partial
 
 import numpy as np
 import jax.numpy as jnp
 import jax
 import matplotlib.pyplot as plt
+from numba.np.npyfuncs import np_real_mod_impl
 from scipy.integrate import simpson
 from scipy.optimize import bisect
 from jaxopt import ProjectedGradient, projection
@@ -84,3 +86,24 @@ out = pg.run(p0, (1E-6, jnp.inf), window_size=ws, post_synaptic=spike_times, tma
 
 print("recovered params", out[0])
 
+# add std glm
+import pynapple as nap
+import nemos as nmo
+bin_size = 0.001
+count = nap.Ts(spike_times).count(bin_size).astype(float)
+feature = count.value_from(nap.Tsd(time, intensity(time, l0, ws)))[:, None].astype(float)
+feature = feature - feature[0,0] + 1 # make non-zero (log(feature  *w) in the poisson)
+
+jax.config.update("jax_enable_x64", True)
+# risky, no projection available but should work on fake data
+model = nmo.glm.GLM(observation_model=nmo.observation_models.PoissonObservations(lambda x:x)).fit(feature, count)
+
+pred_rate = model.predict(feature)/bin_size
+plt.figure()
+plt.plot(time, intensity(time, l0, ws), label="actual rate")
+plt.plot(pred_rate, label="regular glm rate prediction")
+plt.plot(time, jit_parametric_intensity(time, out[0], ws), label="point-process GLM")
+plt.xlim(0, 50)
+plt.ylim(0, 2)
+plt.legend()
+plt.show()
