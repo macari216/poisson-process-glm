@@ -63,8 +63,8 @@ true = cumulative_intensity(time[-1], l0, ws)
 print(approx - true)
 
 # simulate spikes
-spike_times = simulate_process(5000, lambda x: cumulative_intensity(x, l0, ws))
-pre_synaptic = np.arange(2*ws, 5000, 2*ws).astype(float)
+spike_times = simulate_process(T, lambda x: cumulative_intensity(x, l0, ws))
+pre_synaptic = np.arange(2*ws, T, 2*ws).astype(float)
 
 parametric_intensity = lambda t, params, ws: params[0] + params[1] * jnp.asarray((t % (2 * ws)) > ws, dtype=float)
 parametric_cumul = lambda t, params, ws: params[0] * t + params[1] * (ws * (t // (2 * ws)) + jax.nn.relu(t - 2 * ws * (t // 20) - ws))
