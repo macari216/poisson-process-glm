@@ -74,12 +74,12 @@ jit_parametric_intensity = jax.jit(parametric_intensity)
 jit_parametric_cumul = jax.jit(parametric_cumul)
 
 @jax.jit
-def log_likelihood(params, window_size, post_synaptic, tmax):
+def neg_log_likelihood(params, window_size, post_synaptic, tmax):
     log_lam = jnp.log(jit_parametric_intensity(post_synaptic, params, window_size))
     return  jit_parametric_cumul(tmax, params, window_size) - log_lam.sum()
 
 p0 = jnp.asarray([0.05, 2])
-pg = ProjectedGradient(fun=log_likelihood, projection=projection.projection_box)
+pg = ProjectedGradient(fun=neg_log_likelihood, projection=projection.projection_box)
 out = pg.run(p0, (1E-6, jnp.inf), window_size=ws, post_synaptic=spike_times, tmax=T)
 
 print("recovered params", out[0])
