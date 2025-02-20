@@ -129,7 +129,7 @@ p0 = jnp.asarray([1, 2], dtype=float)
 pg = ProjectedGradient(fun=neg_log_likelihood, projection=projection.projection_box)
 pp_fit = pg.run(p0, (1E-6, jnp.inf), window_size=ws, post_synaptic=spike_times, tmax=T)
 
-print("recovered params", out[0])
+print("recovered params", pp_fit[0])
 
 ```
 
@@ -153,7 +153,7 @@ plt.figure()
 plt.title("compare predicted rate")
 plt.plot(time, intensity(time, l0, ws), label="actual rate")
 plt.plot(pred_rate, label="regular glm rate prediction")
-plt.plot(time, jit_parametric_intensity(time, out[0], ws), label="point-process GLM")
+plt.plot(time, jit_parametric_intensity(time, pp_fit[0], ws), label="point-process GLM")
 plt.xlim(0, 50)
 plt.ylim(0, 2)
 plt.legend()
@@ -166,7 +166,7 @@ Now we will generalize this construction to fit an exact Point Process GLM under
 
 - Identity link function.
 - Non-negative basis.
-- Fit using projected gradient or other constrained optimization to ensure non-negative rate. If BSplines are used then, since $\sum b_k(t) = 1$ for all $t$ in the domain of the basis, convolving the spike times with $f(t) = \begin{cases} 1 && 0\le t\le\Delta \\ 0 && \text{otherwise}\end{cases}$, and taking the max of the convolution with the spike times, i.e. $m = \max_t f(t) * \delta(t_j - t)$, than, for a positive rate it is sufficeint that: $m \cdot \sum_{i=1}^{n+1} w_i \ge w_0$
+- Fit using projected gradient or other constrained optimization to ensure non-negative rate. If $n$ BSplines are used then we have $n+1$ weights $\mathbf{w}$ includig the intercept. Since $\sum b_k(t) = 1$ for all $t$ in the domain of the basis, convolving the spike times with $f(t) = \begin{cases} 1 && 0\le t\le\Delta \\ 0 && \text{otherwise}\end{cases}$, and taking the max of the convolution with the spike times, i.e. $m = \max_t f(t) * \delta(t_j - t)$, than, for a positive rate it is sufficeint that: $m \cdot \sum_{i=1}^{n+1} w_i < w_0$
 
 This construction can be easily generalized to N neurons, but let's start assuming a single pre-synaptic and post-synaptic neuron for simplicity.
 Let $\Phi(t) = [b_1(t), ..., b_n(t)]$ a vector of $n$ basis fuctions such as $b_k(t) \ge 0$. All the basis have support contained in $[0, \Delta)$.
