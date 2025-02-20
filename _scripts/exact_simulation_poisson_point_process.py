@@ -65,7 +65,7 @@ print(approx - true)
 
 # simulate spikes
 spike_times = simulate_process(T, lambda x: cumulative_intensity(x, l0, ws))
-pre_synaptic = np.arange(2*ws, T, 2*ws).astype(float)
+pre_synaptic = np.arange(ws, T, 2*ws).astype(float)
 
 parametric_intensity = lambda t, params, ws: params[0] + params[1] * jnp.asarray((t % (2 * ws)) > ws, dtype=float)
 parametric_cumul = lambda t, params, ws: params[0] * t + params[1] * (ws * (t // (2 * ws)) + jax.nn.relu(t - 2 * ws * (t // 20) - ws))
@@ -83,10 +83,4 @@ pg = ProjectedGradient(fun=neg_log_likelihood, projection=projection.projection_
 out = pg.run(p0, (1E-6, jnp.inf), window_size=ws, post_synaptic=spike_times, tmax=T)
 
 print("recovered params", out[0])
-
-
-
-
-
-
 
