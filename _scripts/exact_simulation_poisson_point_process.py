@@ -24,7 +24,7 @@ def simulate_process(t_max, cumul_intensity, seed=123):
     np.random.seed(seed)
     spike_times = []
     s = 0
-    step_for_bisect = 10
+    step_for_bisect = t_max / 100.
     t0 = 0
     upper = step_for_bisect
     while t0 < t_max:
