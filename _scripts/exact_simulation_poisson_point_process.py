@@ -79,7 +79,9 @@ def log_likelihood(params, window_size, post_synaptic, tmax):
 
 p0 = jnp.asarray([0.05, 2])
 pg = ProjectedGradient(fun=log_likelihood, projection=projection.projection_box)
-pg.run(p0, (1E-6, jnp.inf), window_size=ws, post_synaptic=spike_times, tmax=T)
+out = pg.run(p0, (1E-6, jnp.inf), window_size=ws, post_synaptic=spike_times, tmax=T)
+
+print("recovered params", out[0])
 
 
 
