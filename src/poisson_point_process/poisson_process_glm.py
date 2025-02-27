@@ -8,11 +8,13 @@ from numpy.typing import ArrayLike
 import jax
 import jax.numpy as jnp
 import jaxopt
+
 from functools import partial
+from itertools import combinations
 
 from .basis import raised_cosine_log_eval
-from .utils import adjust_indices_and_spike_times, reshape_for_vmap, slice_array
-from .base_regressor import BaseRegressor
+from .utils import adjust_indices_and_spike_times, reshape_for_vmap, slice_array, compute_max_window_size
+from .base_regressor_MC import BaseRegressor
 
 from nemos import tree_utils, validation
 from nemos.pytrees import FeaturePytree
@@ -47,12 +49,15 @@ class ContinuousMC(BaseRegressor):
         # required to compute neg ll - no separate observation model class
         self.n_basis_funcs = obs_model_kwargs["n_basis_funcs"]
         self.n_batches_scan = obs_model_kwargs["n_batches_scan"]
-        self.max_window = obs_model_kwargs["max_window"]
         self.history_window = obs_model_kwargs["history_window"]
         self.inverse_link_function = obs_model_kwargs["inverse_link_function"]
         self.random_key = obs_model_kwargs["mc_random_key"]
         self.M = int(obs_model_kwargs["mc_n_samples"])
+        # self.T = obs_model_kwargs["tot_time"]
+        # self.max_window = obs_model_kwargs["max_window"]
         self.T = 1000
+        self.max_window = 1
+
 
     @staticmethod
     def _check_params(
@@ -99,12 +104,13 @@ class ContinuousMC(BaseRegressor):
     def _check_input_n_timepoints(
             X: Union[DESIGN_INPUT_TYPE, jnp.ndarray], y: jnp.ndarray
     ):
-        if y.shape[1] > X.shape[1]:
+        if y[1,-1] > X.shape[1]+1:
             raise ValueError(
-                "The number of spikes in y cannot exceed the number of spikes in X."
-                f"X has {X.shape[1]} spikes, "
-                f"y has {y.shape[1]} spikes!"
-            )
+                    "The position index in y cannot exceed the number of spikes in X."
+                    f"X has {X.shape[1]} spikes, "
+                    f"the largest index in y is {y.shape[1]}!"
+                )
+        pass
 
     @staticmethod
     def _check_input_dimensionality(
@@ -175,7 +181,8 @@ class ContinuousMC(BaseRegressor):
     def sum_basis_and_dot(self, weights, dts):
         """compilable linear-non-linear transform"""
         fx = raised_cosine_log_eval(dts, self.history_window, self.n_basis_funcs)
-        return jnp.sum(fx * weights, axis=1)
+        # return jnp.sum(fx * weights, axis=1)
+        return jnp.sum(fx * weights)
 
     def linear_non_linear(self, dts, weights, bias):
         ll = self.inverse_link_function(self.sum_basis_and_dot(weights, dts) + bias)
@@ -184,11 +191,12 @@ class ContinuousMC(BaseRegressor):
     def draw_mc_sample(self, X, M, random_key):
         """draw sample for a Monte-Carlo estimate of /int_0^T(lambda(t))dt"""
         keys = jax.random.split(random_key, 2)
-        valid_spikes = X[0, :-self.max_window]
-        s_m = jax.random.choice(keys[0], valid_spikes, shape=(M,), replace=True)
-        epsilon_m = jax.random.uniform(keys[1], shape=(M,), minval=0.0, maxval=self.history_window)
-        tau_m = s_m + epsilon_m
-        tau_m_idx = jnp.searchsorted(X[0], tau_m, "right")-1
+        tau_m = jax.random.uniform(keys[0], shape=(M,), minval=0, maxval=self.T)
+        # valid_spikes = X[0, self.max_window:-self.max_window]
+        # s_m = jax.random.choice(keys[0], valid_spikes, shape=(M,), replace=True)
+        # epsilon_m = jax.random.uniform(keys[1], shape=(M,), minval=0.0, maxval=self.history_window)
+        # tau_m = s_m + epsilon_m
+        tau_m_idx = jnp.searchsorted(X[0], tau_m)-1
         mc_spikes = jnp.vstack((tau_m, tau_m_idx))
 
         return mc_spikes
@@ -204,14 +212,13 @@ class ContinuousMC(BaseRegressor):
 
         weights, bias = params
         weights = weights.reshape(-1, self.n_basis_funcs)
-        # weights = jnp.vstack((jnp.zeros(self.n_basis_funcs), weights))
 
         shifted_spikes_array, padding = reshape_for_vmap(y, self.n_batches_scan)
 
         # body of the scan function
         def scan_fn(lam_s, i):
             spk_in_window = slice_array(
-                X, i[1].astype(int) + 1, self.max_window + 1
+                X, i[1].astype(int)+1, self.max_window+1
             )
 
             dts = spk_in_window[0] - i[0]
@@ -219,12 +226,10 @@ class ContinuousMC(BaseRegressor):
             ll = optional_log(
                 self.linear_non_linear(dts, weights[spk_in_window[1].astype(int)], bias)
             )
-            # jax.debug.print("i: {}", i)
-            # jax.debug.print("ll: {}", ll)
             lam_s += jnp.sum(ll)
             return lam_s, None
 
-        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.array(0), idxs))
+        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.array(0), idxs), in_axes=1)
         out, _ = scan_vmap(shifted_spikes_array)
         sub, _ = scan_vmap(padding[None,:])
         return jnp.sum(out) - jnp.sum(sub)
@@ -301,11 +306,10 @@ class ContinuousMC(BaseRegressor):
         )
         # get coef dimensions
         n_neurons = len(jnp.unique(X[1]))
-        n_basis_funcs = self.n_basis_funcs
 
         #initialize parameters
         init_params = (
-            jnp.zeros(n_neurons * n_basis_funcs),
+            jnp.zeros(n_neurons * self.n_basis_funcs),
             initial_intercept,
         )
         return init_params
@@ -338,10 +342,24 @@ class ContinuousMC(BaseRegressor):
             init_params,
     ) -> Union[Any, NamedTuple]:
         """Initialize the state of the solver for running fit and update."""
+
+        #add max window padding to X and y
+        self.max_window = int(
+            jnp.maximum(
+                compute_max_window_size(jnp.array([-self.history_window, 0]), y[0], X[0]),
+                compute_max_window_size(jnp.array([-self.history_window, 0]), X[0], X[0])
+            )
+        )
+
+        data, y = adjust_indices_and_spike_times(X, y, self.history_window, self.max_window)
+
         if isinstance(X, FeaturePytree):
             data = X.data
         else:
             data = X
+
+        # set total recording time
+        self.T = data[0, -1]+self.history_window
 
         if isinstance(self.regularizer, GroupLasso):
             if self.regularizer.mask is None:
@@ -363,7 +381,6 @@ class ContinuousMC(BaseRegressor):
 
         return opt_state
 
-
     def fit(
         self,
         X: Union[DESIGN_INPUT_TYPE, ArrayLike],
@@ -372,15 +389,28 @@ class ContinuousMC(BaseRegressor):
     ):
         """Fit the model to neural activity."""
         #add max window padding to X and y
+        self.max_window = int(
+            jnp.maximum(
+                compute_max_window_size(jnp.array([-self.history_window, 0]), y[0], X[0]),
+                compute_max_window_size(jnp.array([-self.history_window, 0]), X[0], X[0])
+            )
+        )
+
         X, y = adjust_indices_and_spike_times(X, y, self.history_window, self.max_window)
 
-        self.T = jnp.ceil(X[0, -1])
+        if isinstance(X, FeaturePytree):
+            data = X.data
+        else:
+            data = X
 
-        init_params = self.initialize_params(X, y, init_params=init_params)
+        # set total recording time
+        self.T = data[0, -1]+self.history_window
+
+        init_params = self.initialize_params(data, y, init_params=init_params)
 
         self.initialize_state(X, y, init_params)
 
-        params, state = self._solver_run(init_params, self.random_key, X, y)
+        params, state = self._solver_run(init_params, self.random_key, data, y)
 
         if tree_utils.pytree_map_and_reduce(
             lambda x: jnp.any(jnp.isnan(x)), any, params
@@ -406,14 +436,26 @@ class ContinuousMC(BaseRegressor):
             **kwargs,
     ) -> jaxopt.OptStep:
         """Run a single update step of the jaxopt solver."""
-
         #add max window padding to X and y
+        self.max_window = int(
+            jnp.maximum(
+                compute_max_window_size(jnp.array([-self.history_window, 0]), y[0], X[0]),
+                compute_max_window_size(jnp.array([-self.history_window, 0]), X[0], X[0])
+            )
+        )
+
         X, y = adjust_indices_and_spike_times(X, y, self.history_window, self.max_window)
 
-        self.T = int(jnp.ceil(X[0, -1]))
+        if isinstance(X, FeaturePytree):
+            data = X.data
+        else:
+            data = X
+
+        # set total recording time
+        self.T = data[0, -1]+self.history_window
 
         # perform a one-step update
-        opt_step = self._solver_update(params, opt_state, self.random_key, X, y, *args, **kwargs)
+        opt_step = self._solver_update(params, opt_state, self.random_key, data, y, *args, **kwargs)
 
         # store params and state
         self._set_coef_and_intercept(opt_step[0])

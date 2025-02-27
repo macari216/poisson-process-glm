@@ -2,7 +2,6 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 
 @jax.jit
@@ -35,6 +34,6 @@ def reshape_for_vmap(spikes, n_batches_scan):
     shifted_spikes = jnp.hstack(
         (spikes, padding)
     )
-    shifted_spikes_array = shifted_spikes.reshape(n_batches_scan, spikes.shape[0], -1).transpose(0,2,1)
+    shifted_spikes_array = shifted_spikes.reshape(2,n_batches_scan,-1).transpose(1,2,0)
 
     return shifted_spikes_array, padding.transpose(1,0)
