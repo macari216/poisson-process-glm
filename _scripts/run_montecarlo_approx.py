@@ -5,37 +5,20 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import nemos as nmo
-import pynapple as nap
 
 import matplotlib.pyplot as plt
 
 from poisson_point_process import simulate
-from poisson_point_process.utils import compute_max_window_size, slice_array, adjust_indices_and_spike_times
-from poisson_point_process.basis import raised_cosine_log_eval
 from poisson_point_process.poisson_process_glm import ContinuousMC
 
 jax.config.update("jax_enable_x64", True)
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
-all_to_all = False
+all_to_all = True
 
 # generate data
-# n_neurons = 1
-# target_neu_id = 1
-# history_window = 0.1
-# tot_time_sec = 10
-# binsize = 0.001
-# window_size = int(history_window / binsize)
-# n_basis_funcs = 2
-# n_bins_tot = int(tot_time_sec / binsize)
-# n_batches_scan = 1
-# inverse_link = jnp.exp
-# rc_basis = nmo.basis.RaisedCosineLogConv(n_basis_funcs, window_size=window_size)
-# time, kernels = rc_basis.evaluate_on_grid(window_size)
-# time *= history_window
-
-n_neurons = 1
-target_neu_id = n_neurons
+n_neurons = 9
+target_neu_id = 0
 history_window = 0.1
 tot_time_sec = 1000
 binsize = 0.001
@@ -58,35 +41,30 @@ if all_to_all:
     baseline_fr = 2.1
     biases = jnp.array(np.abs(np.random.normal(baseline_fr, baseline_fr / 10, n_neurons))) + np.log(binsize)
     bias_true = biases[target_neu_id]
+    posts_rate_per_sec = biases[target_neu_id] - np.log(binsize)
 
-    weights_true = jnp.array(np.random.normal(0, 0.01, size=(n_neurons, n_neurons, n_basis_funcs)))
+    weights_true = jnp.array(np.random.normal(0, 0.1, size=(n_neurons, n_neurons, n_basis_funcs)))
     params = (weights_true, biases)
 
-    spike_counts, _ = simulate.poisson_counts_recurrent(n_bins_tot, n_neurons, window_size, kernels, params, inverse_link)
+    spike_counts, rates = simulate.poisson_counts_recurrent(n_bins_tot, n_neurons, window_size, kernels, params, inverse_link)
 
+    print(f"total spikes: {spike_counts.sum()}, y spikes: {spike_counts[:, target_neu_id].sum()}")
     print(f"mean spikes per neuron: {jnp.mean(spike_counts.sum(0))}")
     print(f"max spikes per bin: {spike_counts.max()}")
     print(f"ISI (ms): {tot_time_sec*1000 / jnp.mean(spike_counts.sum(0))}")
-    # plt.hist(spike_counts.sum(0), bins=50)
-    # plt.show()
+    plt.plot(rates[:, target_neu_id])
+    plt.show()
 
     spike_times, spike_ids = simulate.poisson_times(spike_counts, tot_time_sec, binsize)
-
-    # spikes_tsgroup = nap.TsGroup({n: nap.Ts(np.array(spike_times[neuron_indices == n]))
-    #                               for n in range(n_neurons)},
-    #                                 nap.IntervalSet(0, tot_time_sec))
 
     X_spikes = jnp.vstack((spike_times,spike_ids))
     spike_idx_target = jnp.arange(len(spike_times))[spike_ids == target_neu_id]
     y_spikes = jnp.vstack((spike_times[spike_idx_target], spike_idx_target))
 
-    print(f"y spikes total: {y_spikes.shape[1]}")
-    print(f"X spikes total: {X_spikes.shape[1]}")
-
     rc_basis.set_input_shape(spike_counts)
-
-    X_discrete = rc_basis.compute_features(spike_counts)
-    y_discrete = spike_counts[:, target_neu_id]
+    X = rc_basis.compute_features(spike_counts)
+    y_counts = spike_counts[:, target_neu_id]
+    lam_posts = rates[:, target_neu_id]
 
 else:
     # all-to-one connectivity
@@ -109,40 +87,13 @@ else:
     plt.plot(lam_posts)
     plt.show()
 
-    # spike_times, spike_ids = simulate.poisson_times(jnp.hstack((X_counts, y_counts[:,None])), tot_time_sec, binsize)
-    # X_spikes = jnp.vstack((spike_times,spike_ids))
-    # spike_idx_target = jnp.arange(len(spike_times))[spike_ids == target_neu_id]
-    # y_spikes = jnp.vstack((spike_times[spike_idx_target], spike_idx_target))
-
     spike_times, spike_ids = simulate.poisson_times(X_counts, tot_time_sec, binsize)
     spike_times_y, _ = simulate.poisson_times(y_counts[:, None], tot_time_sec, binsize)
-    max_window = int(
-        jnp.maximum(
-            compute_max_window_size(jnp.array([-history_window, 0]), spike_times_y, spike_times),
-            compute_max_window_size(jnp.array([-history_window, 0]), spike_times, spike_times)
-        )
-    )
-    shift = jnp.vstack((jnp.full(max_window, -history_window-1), jnp.full(max_window, -1)))
-    # X_spikes = jnp.hstack((shift, jnp.vstack((spike_times, spike_ids))))
     X_spikes = jnp.vstack((spike_times, spike_ids))
     target_idx = jnp.searchsorted(X_spikes[0], spike_times_y)-1
     y_spikes = jnp.vstack((spike_times_y, target_idx))
 
-    rc_basis.set_input_shape(y_counts)
-
-    X_discrete = jnp.hstack((X, rc_basis.compute_features(y_counts)))
-    y_discrete = y_counts
-
 print(f"generated data: {np.round(perf_counter() - t0, 5)}")
-
-# maximum number of spikes in window across the entire dataset
-# max_window = int(compute_max_window_size(
-#         jnp.array([-history_window, 0]), X_spikes[0], X_spikes[0]
-#     ))
-
-basis_fn = lambda delta_ts: raised_cosine_log_eval(
-    delta_ts, history_window, n_basis_funcs, width=2., time_scaling=50.
-)
 
 obs_model_kwargs = {
     "n_basis_funcs": n_basis_funcs,
@@ -154,41 +105,26 @@ obs_model_kwargs = {
 }
 print(y_spikes.shape[1]*10)
 
-model = ContinuousMC(solver_name="GradientDescent", obs_model_kwargs=obs_model_kwargs, solver_kwargs={"has_aux": True, "acceleration": False, "stepsize": 0.0001})
-
-true_params = (jnp.array(weights_true), jnp.array([bias_true]))
+model = ContinuousMC(solver_name="GradientDescent", obs_model_kwargs=obs_model_kwargs, solver_kwargs={"has_aux": True, "acceleration": False, "stepsize": 1e-7})
+true_params = (weights_true[target_neu_id].ravel(), jnp.array([posts_rate_per_sec]))
 params = model.initialize_params(X_spikes, y_spikes)
 state = model.initialize_state(X_spikes, y_spikes, params)
 
-mc_samples = model.draw_mc_sample(X_spikes, y_spikes.shape[1]*40, jax.random.PRNGKey(0))
-print(f"true weights, 1st term: {model.compute_summed_ll(X_spikes, 
-                                                         y_spikes, 
-                                                 (weights_true, jnp.array([posts_rate_per_sec])),
-                                                         log=True
-                                                         )}, "
-      f"2nd term: {(tot_time_sec/(y_spikes.shape[1]*40))*model.compute_summed_ll(X_spikes, 
-                                                                                 mc_samples, 
-                                                                         (weights_true, jnp.array([posts_rate_per_sec])), 
-                                                                                 log=False)}")
-
-num_iter = 500
+num_iter = 1000
 tt0 = perf_counter()
 error = np.zeros(num_iter)
-error_sr = 10
 for step in range(num_iter):
     t0 = perf_counter()
     params, state = model.update(params, state, X_spikes, y_spikes)
+    # error[step] = state.error
+    error[step] = model._negative_log_likelihood(X_spikes, y_spikes, params, state.aux)
     t1 = perf_counter()
-    if step % error_sr == 0:
-        # error[step] = model._negative_log_likelihood(X_spikes, y_spikes, params, state.aux)
-        error[step] = state.error
-        print(f"step {step}, {t1 - t0}")
-        print(f"params{params}, error: {error[step]}")
+    if step % 50 == 0:
+        print(f"step {step}, time: {t1 - t0}, error: {error[step]}")
 print(f"fitted model, {perf_counter() - tt0}")
-error = error[error!=0]
 
 obs_model = nmo.observation_models.PoissonObservations(inverse_link)
-model_exact = nmo.glm.GLM(solver_name="LBFGS",observation_model=obs_model).fit(X, y_discrete)
+model_exact = nmo.glm.GLM(solver_name="LBFGS",observation_model=obs_model,solver_kwargs={"tol":1e-12}).fit(X, y_counts)
 
 weights_nemos, bias_nemos = model_exact.coef_.reshape(-1,n_basis_funcs), model_exact.intercept_
 weights_mc, bias_mc = model.coef_.reshape(-1,n_basis_funcs), model.intercept_
@@ -204,7 +140,7 @@ print(f"nemos weights: {model_exact.coef_, model_exact.intercept_}")
 
 results = {
     "error": error,
-    "true_params": true_params,
+    "true_params": (weights_true, bias_true),
     "mc_params": (weights_mc, bias_mc),
     "exact_params": (weights_nemos, bias_nemos),
     "kernels": kernels,
@@ -241,12 +177,12 @@ plt.tight_layout()
 
 
 #compare filters
-fig, axs = plt.subplots(3,2,figsize=(7,9))
+fig, axs = plt.subplots(5,2,figsize=(7,9))
 # fig, axs = plt.subplots(1,2,figsize=(7,5))
 axs = axs.flat
 for n, ax in enumerate(axs):
     if n==0:
-        ax.plot(np.arange(0, num_iter,error_sr),error, c='k')
+        ax.plot(np.arange(0, num_iter),error, c='k')
         ax.set_xlabel("epoch")
         ax.set_ylabel("loss")
     else:

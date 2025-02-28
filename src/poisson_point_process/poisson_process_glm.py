@@ -194,7 +194,7 @@ class ContinuousMC(BaseRegressor):
         # s_m = jax.random.choice(keys[0], valid_spikes, shape=(M,), replace=True)
         # epsilon_m = jax.random.uniform(keys[1], shape=(M,), minval=0.0, maxval=self.history_window)
         # tau_m = s_m + epsilon_m
-        tau_m_idx = jnp.searchsorted(X[0], tau_m)-1
+        tau_m_idx = jnp.searchsorted(X[0], tau_m)
         mc_spikes = jnp.vstack((tau_m, tau_m_idx))
 
         return mc_spikes
@@ -216,7 +216,7 @@ class ContinuousMC(BaseRegressor):
         # body of the scan function
         def scan_fn(lam_s, i):
             spk_in_window = slice_array(
-                X, i[1].astype(int)+1, self.max_window+1
+                X, i[1].astype(int), self.max_window
             )
 
             dts = spk_in_window[0] - i[0]
