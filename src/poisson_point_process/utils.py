@@ -1,3 +1,6 @@
+from typing import Any, Callable, NamedTuple, Optional, Tuple, Union
+from numpy.typing import ArrayLike
+
 from functools import partial
 
 import jax
@@ -17,15 +20,23 @@ def compute_max_window_size(bounds, spike_times, all_spikes):
 def slice_array(array, i, window_size):
     return jax.lax.dynamic_slice(array, (0,i - window_size), (2,window_size,))
 
-@partial(jax.jit, static_argnums=(2,3))
-def adjust_indices_and_spike_times(X, y, history_window, max_window):
-    shifted_idx = y[1].astype(int) + max_window
-    shifted_y =  jnp.vstack((y[0], shifted_idx))
-
+@partial(jax.jit, static_argnums=(1,2))
+def adjust_indices_and_spike_times(
+        X: ArrayLike,
+        history_window: float,
+        max_window: int,
+        y: Optional=None,
+):
     shift = jnp.vstack((jnp.full(max_window, -history_window - 1), jnp.full(max_window, 0)))
     shifted_X = jnp.hstack((shift, X))
 
-    return shifted_X, shifted_y
+    if y is not None:
+        shifted_idx = y[1].astype(int) + max_window
+        shifted_y =  jnp.vstack((y[0], shifted_idx))
+        return shifted_X, shifted_y
+
+    else:
+        return shifted_X
 
 @partial(jax.jit, static_argnums=1)
 def reshape_for_vmap(spikes, n_batches_scan):

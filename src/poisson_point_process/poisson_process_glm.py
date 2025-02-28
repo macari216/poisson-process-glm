@@ -53,8 +53,6 @@ class ContinuousMC(BaseRegressor):
         self.inverse_link_function = obs_model_kwargs["inverse_link_function"]
         self.random_key = obs_model_kwargs["mc_random_key"]
         self.M = int(obs_model_kwargs["mc_n_samples"])
-        # self.T = obs_model_kwargs["tot_time"]
-        # self.max_window = obs_model_kwargs["max_window"]
         self.T = 1000
         self.max_window = 1
 
@@ -351,7 +349,7 @@ class ContinuousMC(BaseRegressor):
             )
         )
 
-        data, y = adjust_indices_and_spike_times(X, y, self.history_window, self.max_window)
+        data, y = adjust_indices_and_spike_times(X, self.history_window, self.max_window, y)
 
         if isinstance(X, FeaturePytree):
             data = X.data
@@ -359,7 +357,7 @@ class ContinuousMC(BaseRegressor):
             data = X
 
         # set total recording time
-        self.T = data[0, -1]+self.history_window
+        self.T = jnp.ceil(data[0, -1])
 
         if isinstance(self.regularizer, GroupLasso):
             if self.regularizer.mask is None:
@@ -396,7 +394,7 @@ class ContinuousMC(BaseRegressor):
             )
         )
 
-        X, y = adjust_indices_and_spike_times(X, y, self.history_window, self.max_window)
+        X, y = adjust_indices_and_spike_times(X, self.history_window, self.max_window, y)
 
         if isinstance(X, FeaturePytree):
             data = X.data
@@ -404,7 +402,7 @@ class ContinuousMC(BaseRegressor):
             data = X
 
         # set total recording time
-        self.T = data[0, -1]+self.history_window
+        self.T = jnp.ceil(data[0, -1])
 
         init_params = self.initialize_params(data, y, init_params=init_params)
 
@@ -444,7 +442,7 @@ class ContinuousMC(BaseRegressor):
             )
         )
 
-        X, y = adjust_indices_and_spike_times(X, y, self.history_window, self.max_window)
+        X, y = adjust_indices_and_spike_times(X, self.history_window, self.max_window, y)
 
         if isinstance(X, FeaturePytree):
             data = X.data
@@ -452,7 +450,7 @@ class ContinuousMC(BaseRegressor):
             data = X
 
         # set total recording time
-        self.T = data[0, -1]+self.history_window
+        self.T = jnp.ceil(data[0, -1])
 
         # perform a one-step update
         opt_step = self._solver_update(params, opt_state, self.random_key, data, y, *args, **kwargs)
@@ -464,9 +462,37 @@ class ContinuousMC(BaseRegressor):
 
         return opt_step
 
-    def predict(self, X: DESIGN_INPUT_TYPE) -> jnp.ndarray:
+    def predict(
+            self,
+            X: Union[DESIGN_INPUT_TYPE, ArrayLike],
+            bin_size: Optional=0.001,
+    ) -> jnp.ndarray:
         """Predict rates based on fit parameters."""
-        pass
+
+        def intensity_function(X, t, log=False):
+            optional_log = jnp.log if log else lambda x: x
+
+            weights = self.coef_.reshape(-1, self.n_basis_funcs)
+            bias = self.intercept_
+
+            spk_in_window = slice_array(
+                X, t[1].astype(int), self.max_window
+            )
+            dts = spk_in_window[0] - t[0]
+
+            return optional_log(
+                self.linear_non_linear(dts, weights[spk_in_window[1].astype(int)], bias)
+            )
+
+        intensity_function_vmap = jax.vmap(lambda idx: intensity_function(X, idx, log=False), in_axes=(1,))
+
+        X = adjust_indices_and_spike_times(X, self.history_window, self.max_window)
+
+        bin_times = jnp.linspace(0, self.T, int(self.T / bin_size), endpoint=False)
+        bin_idx = jnp.searchsorted(X[0], bin_times, "right")
+        bin_array =  jnp.vstack((bin_times, bin_idx))
+
+        return intensity_function_vmap(bin_array).squeeze()
 
     def score(
             self,

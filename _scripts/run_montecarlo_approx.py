@@ -148,11 +148,9 @@ obs_model_kwargs = {
     "n_basis_funcs": n_basis_funcs,
     "history_window": history_window,
     "inverse_link_function": inverse_link,
-    # "max_window": max_window,
     "n_batches_scan": n_batches_scan,
     "mc_random_key": jax.random.PRNGKey(0),
     "mc_n_samples": y_spikes.shape[1]*10,
-    # "tot_time": tot_time_sec,
 }
 print(y_spikes.shape[1]*10)
 
@@ -182,7 +180,8 @@ for step in range(num_iter):
     params, state = model.update(params, state, X_spikes, y_spikes)
     t1 = perf_counter()
     if step % error_sr == 0:
-        error[step] = model._negative_log_likelihood(X_spikes, y_spikes, params, state.aux)
+        # error[step] = model._negative_log_likelihood(X_spikes, y_spikes, params, state.aux)
+        error[step] = state.error
         print(f"step {step}, {t1 - t0}")
         print(f"params{params}, error: {error[step]}")
 print(f"fitted model, {perf_counter() - tt0}")
@@ -215,50 +214,17 @@ results = {
 # np.save(f"/mnt/home/amedvedeva/ceph/MC_fit.npz", results)
 # print("Script terminated")
 
-
-mc_samples = model.draw_mc_sample(X_spikes, y_spikes.shape[1]*40, jax.random.PRNGKey(0))
-print(f"true weights, 1st term: {model.compute_summed_ll(X_spikes, 
-                                                         y_spikes, 
-                                                 (weights_true, jnp.array([posts_rate_per_sec])),
-                                                         log=True
-                                                         )}, "
-      f"2nd term: {(tot_time_sec/(y_spikes.shape[1]*40))*model.compute_summed_ll(X_spikes, 
-                                                                                 mc_samples, 
-                                                                         (weights_true, jnp.array([posts_rate_per_sec])), 
-                                                                                 log=False)}")
-print(f"inferred weights, 1st term: {model.compute_summed_ll(X_spikes, 
-                                                         y_spikes, 
-                                                 (model.coef_, model.intercept_),
-                                                         log=True
-                                                         )}, "
-      f"2nd term: {(tot_time_sec/(y_spikes.shape[1]*40))*model.compute_summed_ll(X_spikes, 
-                                                                                 mc_samples, 
-                                                                         (model.coef_, model.intercept_), 
-                                                                                 log=False)}")
-
-# print(model._negative_log_likelihood(X_spikes, y_spikes, (weights_true, jnp.array([posts_rate_per_sec])), jax.random.PRNGKey(0)))
+# compare scores
+pred_MC = model.predict(X_spikes, binsize)
+pred_exact = model_exact.predict(X)
+print(f"discrete (exact) pseudo-r2 score: {np.round(obs_model.pseudo_r2(y_counts, pred_exact), 5)}")
+print(f"continuous (approx) pseudo-r2 score: {np.round(obs_model.pseudo_r2(y_counts, pred_MC*binsize), 5)}")
+print(f"discrete (exact) log-likelohood score: {np.round(obs_model.log_likelihood(y_counts, pred_exact), 5)}")
+print(f"continuous (approx) log-likelohood score: {np.round(obs_model.log_likelihood(y_counts, pred_MC*binsize), 5)}")
 
 #compare predicted rate
-def lam_at_t(X, y, params, log=False):
-    optional_log = jnp.log if log else lambda x: x
-    weights, bias = params
-    weights = weights.reshape(-1, n_basis_funcs)
-    spk_in_window = slice_array(
-        X, y[1].astype(int), max_window
-    )
-    dts = spk_in_window[0] - y[0]
-    dts_eval = jnp.sum(basis_fn(dts) * weights[spk_in_window[1].astype(int)]) + bias
-    return optional_log(inverse_link(dts_eval))
-lam_at_t_vmap = jax.vmap(lambda idx, p: lam_at_t(X_spikes, idx, p, log=False), in_axes=(1, None))
-
 def select_spk(spikes, ep):
     return spikes[0, (spikes[0] > ep[0] * binsize) & (spikes[0] < ep[1] * binsize)] / binsize
-
-t = jnp.linspace(0,tot_time_sec,int(tot_time_sec/binsize), endpoint=False)
-t_idx = jnp.searchsorted(X_spikes[0], t, "right")
-bin_spikes = jnp.vstack((t, t_idx))
-pred_MC = lam_at_t_vmap(bin_spikes, (model.coef_, model.intercept_))
-pred_exact = model_exact.predict(X)
 eps = [(260000,270000),(710000,720000)]
 # eps = [(13000,16000),(71000,74000)]
 fig, axs = plt.subplots(2,1, figsize=(12,6))
@@ -274,7 +240,7 @@ plt.suptitle("predicted firing rate")
 plt.tight_layout()
 
 
-#compare raw filter shapes
+#compare filters
 fig, axs = plt.subplots(3,2,figsize=(7,9))
 # fig, axs = plt.subplots(1,2,figsize=(7,5))
 axs = axs.flat
@@ -291,29 +257,8 @@ for n, ax in enumerate(axs):
         ax.set_ylabel("gain")
 
         if n==len(axs)-1:
-            lines = [line1[0], line3[0]]
+            lines = [line1[0], line2[0], line3[0]]
             labels = [l.get_label() for l in lines]
             ax.legend(lines, labels, loc="upper right")
 plt.tight_layout()
-
-
-
-# fig, axs = plt.subplots(1,2,figsize=(9,5))
-# for n, ax in enumerate(axs.flat):
-#     line1 = ax.plot(time, filters_true[n], c='g', label='true')
-#     line2 = ax.plot(time, filters_nemos[n], c='k', label='exact')
-#     ax.set_xlabel("time from spike")
-#     ax.set_ylabel("gain")
-#     ax2 = ax.twinx()
-#     line3 = ax2.plot(time, filters_mc[n], c='r', label='approx')
-#     if n==1:
-#         ax2.set_ylabel("gain (MC)", color='r')
-#         ax2.tick_params(axis='y', labelcolor='r')
-#         lines = [line1[0], line2[0], line3[0]]
-#         labels = [l.get_label() for l in lines]
-#         ax.legend(lines, labels, loc="upper right")
-#     else:
-#         ax2.tick_params(labelright=False)
-# plt.tight_layout()
-
 plt.show()
