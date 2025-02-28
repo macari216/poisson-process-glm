@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 import pynapple as nap
 import nemos as nmo
+from scipy.optimize import bisect
 
 def spike_times_uniform(tot_time_sec, tot_spikes_n, n_neurons, seed=216):
     np.random.seed(seed)
@@ -38,12 +39,14 @@ def poisson_counts(mean_per_sec, bias_per_sec, binsize, n_bins_tot, n_pres, weig
 
     rate_per_bin = lam_pres * binsize
     pres_spikes = jnp.array(np.random.poisson(lam=rate_per_bin, size=(n_bins_tot, n_pres)))
-    X = basis.compute_features(pres_spikes)
+    # pres_spikes = np.zeros((n_bins_tot, n_pres))
+    # pres_spikes[::5*ws] = np.ones(n_pres)
+    X = basis.compute_features(jnp.array(pres_spikes))
     X = X[ws:]
     lam_posts = nonlin(np.dot(X, weights_true) + bias_posts)
     posts_spikes = jnp.array(np.random.poisson(lam=lam_posts, size=len(lam_posts)))
 
-    return X, posts_spikes, pres_spikes[ws:], lam_posts
+    return X, posts_spikes, jnp.array(pres_spikes)[ws:], lam_posts
 
 def poisson_counts_recurrent(n_bins_tot, n_neurons, window_size, basis_kernels, params, inv_link):
     # parameters for simulator
@@ -75,7 +78,7 @@ def poisson_times(counts, tot_time_sec, binsize, random_key=jax.random.PRNGKey(0
     n_bins_tot, n_neurons = counts.shape
     bin_starts = jnp.linspace(0, tot_time_sec, n_bins_tot, endpoint=False)
 
-    repeated_bins = jnp.repeat(bin_starts, counts.sum(1))
+    repeated_bins = jnp.repeat(bin_starts, counts.sum(1).astype(int))
     random_offsets = jax.random.uniform(
         random_key,
         shape=(repeated_bins.size,),
@@ -85,7 +88,7 @@ def poisson_times(counts, tot_time_sec, binsize, random_key=jax.random.PRNGKey(0
 
     spike_times = repeated_bins + random_offsets
     neuron_ids = jnp.tile(jnp.arange(n_neurons), n_bins_tot)
-    neuron_indices = jnp.repeat(neuron_ids, counts.flatten())
+    neuron_indices = jnp.repeat(neuron_ids, counts.flatten().astype(int))
 
     #sort by time
     sorted_indices = jnp.argsort(spike_times)
@@ -93,3 +96,33 @@ def poisson_times(counts, tot_time_sec, binsize, random_key=jax.random.PRNGKey(0
     neuron_indices = neuron_indices[sorted_indices]
 
     return spike_times, neuron_indices
+
+
+def inhomogeneous_process(t_max, b, w, ws, seed=123):
+    """
+    Exact simulation of inhomogeneous Poisson Point process
+    by temporal re-scaling method. Cinlar 1975.
+    """
+    # intensity = lambda t, l0, w, ws: l0 + w * ((t % (2 * ws)) > ws).astype(float)
+    cumulative_intensity = lambda t, l0, w, ws: l0 * t + w * (ws * (t // (2 * ws)) + jax.nn.relu((t % (2 * ws)) - ws))
+    cumul_intensity = lambda x: cumulative_intensity(x, b, w, ws)
+    np.random.seed(seed)
+    spike_times = []
+    s = 0
+    step_for_bisect = t_max / 100.
+    t0 = 0
+    upper = step_for_bisect
+    while t0 < t_max:
+        uni = np.random.uniform()
+        s = s - np.log(uni)
+        # very ugly way to be over the optimum
+        # but bisect is very fast and accurate.
+        while cumul_intensity(upper) < s:
+            upper = upper + step_for_bisect
+        spike_times.append(
+            bisect(lambda x: cumul_intensity(x) - s, upper - step_for_bisect, upper, xtol=10**-14)
+        )
+        upper = upper - step_for_bisect
+        t0 = spike_times[-1]
+    spike_times = np.array(spike_times)
+    return spike_times[spike_times < t_max]
