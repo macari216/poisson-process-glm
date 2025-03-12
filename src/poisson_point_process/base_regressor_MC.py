@@ -353,36 +353,36 @@ class BaseRegressor(Base, abc.ABC):
         self._solver_loss_fun_ = loss
 
         def solver_run(
-            init_params: Tuple[DESIGN_INPUT_TYPE, jnp.ndarray], random_key=None, *run_args: jnp.ndarray
+            init_params: Tuple[DESIGN_INPUT_TYPE, jnp.ndarray], random_key, *run_args: jnp.ndarray
         ) -> jaxopt.OptStep:
-
-            if random_key is None:
-                return solver.run(init_params, *args, *run_args, **solver_run_kwargs)
+            if solver_kwargs.get("has_aux", False):
+                return solver.run(init_params, random_key=random_key, *args, *run_args, **solver_run_kwargs, )
             else:
-                return solver.run(init_params, random_key=random_key, *args, *run_args, **solver_run_kwargs,)
+                return solver.run(init_params, *args, *run_args, **solver_run_kwargs)
 
-        def solver_update(params, state, random_key=None, *run_args, **run_kwargs) -> jaxopt.OptStep:
-            if random_key is None:
+        def solver_update(params, state, random_key, *run_args, **run_kwargs) -> jaxopt.OptStep:
+            if solver_kwargs.get("has_aux", False):
                 return solver.update(
-                    params, state, *args, *run_args, **solver_update_kwargs, **run_kwargs
+                    params, state, random_key=random_key, *args, *run_args, **solver_update_kwargs, **run_kwargs,
                 )
             else:
                 return solver.update(
-                params, state, random_key=random_key, *args, *run_args, **solver_update_kwargs, **run_kwargs,
-            )
+                    params, state, *args, *run_args, **solver_update_kwargs, **run_kwargs
+                )
 
-        def solver_init_state(params, random_key=None, *run_args, **run_kwargs) -> NamedTuple:
-            if random_key is None:
+        def solver_init_state(params, random_key, *run_args, **run_kwargs) -> NamedTuple:
+            if solver_kwargs.get("has_aux", False):
                 return solver.init_state(
                     params,
+                    random_key=random_key,
                     *run_args,
                     **run_kwargs,
                     **solver_init_state_kwargs,
                 )
+
             else:
                 return solver.init_state(
                     params,
-                    random_key=random_key,
                     *run_args,
                     **run_kwargs,
                     **solver_init_state_kwargs,
