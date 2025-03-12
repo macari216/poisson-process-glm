@@ -9,7 +9,7 @@ import jax.numpy as jnp
 from scipy.integrate import simpson
 from itertools import combinations
 
-from nemos import utils
+from nemos import utils as nemosutils
 from nemos.observation_models import Observations
 from nemos.typing import DESIGN_INPUT_TYPE
 
@@ -26,20 +26,24 @@ class MonteCarloApproximation(Observations):
 
     def __init__(
             self,
-            obs_model_kwargs,
+            n_basis_funcs,
+            n_batches_scan,
+            history_window,
+            mc_n_samples=None,
             inverse_link_function=jnp.exp,
+            eval_function=raised_cosine_log_eval,
     ):
         super().__init__(inverse_link_function=inverse_link_function)
         self.scale = 1.0
         self.T = None
         self.max_window = None
 
-        self.n_basis_funcs = obs_model_kwargs.get("n_basis_funcs", None)
-        self.n_batches_scan = obs_model_kwargs.get("n_batches_scan", None)
-        self.history_window = obs_model_kwargs.get("history_window", None)
-        self.eval_function = EVAL_FUNCS.get(obs_model_kwargs.get("eval_function", "RaisedCosineLog"), raised_cosine_log_eval)
+        self.n_basis_funcs = n_basis_funcs
+        self.n_batches_scan = n_batches_scan
+        self.history_window = history_window
+        self.eval_function = eval_function
         # model specific
-        self.M = int(obs_model_kwargs.get("mc_n_samples", 1000))
+        self.M = mc_n_samples
 
     def _initialize_data_params(
             self,
@@ -276,25 +280,33 @@ class PolynomialApproximation(MonteCarloApproximation):
 
     def __init__(
             self,
-            obs_model_kwargs,
+            n_basis_funcs,
+            n_batches_scan,
+            history_window,
+            window_size=None,
+            approx_interval=None,
+            eval_function=raised_cosine_log_eval,
             inverse_link_function=jnp.exp,
     ):
         super().__init__(
             inverse_link_function=inverse_link_function,
-            obs_model_kwargs=obs_model_kwargs,
+            n_basis_funcs = n_basis_funcs,
+            n_batches_scan = n_batches_scan,
+            history_window = history_window,
+            eval_function = eval_function,
         )
         self.scale = 1.0
         self.T = None
         self.max_window = None
         self.suff = None
 
-        self.n_basis_funcs = obs_model_kwargs.get("n_basis_funcs", None)
-        self.n_batches_scan = obs_model_kwargs.get("n_batches_scan", None)
-        self.history_window = obs_model_kwargs.get("history_window", None)
-        self.eval_function = EVAL_FUNCS.get(obs_model_kwargs.get("eval_function", "RaisedCosineLog"), raised_cosine_log_eval)
+        self.n_basis_funcs = n_basis_funcs
+        self.n_batches_scan = n_batches_scan
+        self.history_window = history_window
+        self.eval_function = eval_function
         # model specific
-        self.window_size = obs_model_kwargs.get("window_size", None)
-        self.approx_interval = obs_model_kwargs.get("approx_interval", None)
+        self.window_size = window_size
+        self.approx_interval = approx_interval
 
     def _initialize_data_params(
             self,
@@ -340,7 +352,6 @@ class PolynomialApproximation(MonteCarloApproximation):
         return jnp.stack(M_x)
 
     def compute_M_block(self, x, Phi_x, tot_spikes, max_spikes, pair):
-        @jax.jit
         def compute_Mn_half(pair):
             def valid_idx(M_scan, idx):
                 spk_in_window = utils.slice_array(
@@ -410,7 +421,7 @@ class PolynomialApproximation(MonteCarloApproximation):
 
         self_products = jnp.einsum("i,jk->ijk", spikes_n, Phi_x[0])
 
-        M_block_pair = lambda p: self.compute_M_block(x, Phi_x, tot_spikes, spikes_n.max(), p)
+        M_block_pair = lambda p: self.compute_M_block(x, Phi_x, tot_spikes, int(spikes_n.max()), p)
 
         M_self = jax.vmap(M_block_pair)(self_pairs)
         M_self += self_products

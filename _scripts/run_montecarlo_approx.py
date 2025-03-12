@@ -96,16 +96,12 @@ else:
 
 print(f"generated data: {np.round(perf_counter() - t0, 5)}")
 
-obs_model_kwargs = {
-    "n_basis_funcs": n_basis_funcs,
-    "history_window": history_window,
-    "inverse_link_function": inverse_link,
-    "n_batches_scan": n_batches_scan,
-    "mc_n_samples": y_spikes.shape[1]*5,
-}
-print(y_spikes.shape[1]*5)
-
-obs_model = MonteCarloApproximation(obs_model_kwargs, inverse_link)
+obs_model = MonteCarloApproximation(
+    n_basis_funcs=n_basis_funcs,
+    n_batches_scan=n_batches_scan,
+    history_window=history_window,
+    mc_n_samples=y_spikes.shape[1] * 5,
+)
 
 # model = ContinuousMC(solver_name="GradientDescent", obs_model_kwargs=obs_model_kwargs, solver_kwargs={"has_aux": True, "acceleration": False, "stepsize": 1e-7})
 model = ContinuousMC(
@@ -126,7 +122,7 @@ for step in range(num_iter):
     error[step] = state.error
     # error[step] = model._negative_log_likelihood(X_spikes, y_spikes, params, state.aux)
     t1 = perf_counter()
-    if step % 20 == 0:
+    if step % 50 == 0:
         print(f"step {step}, time: {t1 - t0}, error: {error[step]}")
 print(f"fit model, {perf_counter() - tt0}")
 plt.plot(error)
@@ -137,19 +133,20 @@ obs_model_exact = nmo.observation_models.PoissonObservations(inverse_link)
 model_exact = nmo.glm.GLM(
     solver_name="GradientDescent",
     observation_model=obs_model_exact,
-    solver_kwargs={"tol": 1e-12, "acceleration": False, "stepsize": 1e-5})
-n_iter = 1000
-bst = np.append(np.tile(np.arange(0,int(tot_time_sec/binsize),100000), 10), np.array([int(tot_time_sec/binsize)]))
-
-params = model_exact.initialize_params(X_spikes, y_spikes)
-state = model_exact.initialize_state(X_spikes, y_spikes, params)
-error_exact = np.zeros(num_iter)
+    solver_kwargs={"tol": 1e-12, "acceleration": False, "stepsize": 1e-7})
+n_iter = 10000
+bsi = 1000000
+bst = np.tile(np.arange(0,int(tot_time_sec/binsize), bsi), 1000)
+np.random.shuffle(bst)
+params = model_exact.initialize_params(X[:bsi], y_counts[:bsi])
+state = model_exact.initialize_state(X[:bsi], y_counts[:bsi], params)
+error_exact = np.zeros(n_iter)
 for step in range(n_iter):
-    xb, yb = X[bst[step]:bst[step+1]], y_counts[bst[step]:bst[step+1]]
+    xb, yb = X[bst[step]:bst[step]+bsi], y_counts[bst[step]:bst[step]+bsi]
     params, state = model_exact.update(params, state, xb, yb)
     error_exact[step] = state.error
-    if step % 20 == 0:
-        print(f"step {step}, time: {t1 - t0}, error: {error[step]}")
+    if step % 50 == 0:
+        print(f"step {step}, error: {error_exact[step]}")
 plt.plot(error_exact)
 plt.show()
 

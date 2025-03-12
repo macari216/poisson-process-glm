@@ -91,16 +91,14 @@ plt.show()
 
 # interval = interval_discrete
 
-obs_model_kwargs_pa = {
-    "n_basis_funcs": n_basis_funcs,
-    "history_window": history_window,
-    "n_batches_scan": n_batches_scan,
-    "eval_function": "RaisedCosineLog",
-    "window_size": window_size,
-    "approx_interval": interval
-}
-
-obs_model_pa = PolynomialApproximation(obs_model_kwargs=obs_model_kwargs_pa, inverse_link_function=inverse_link)
+obs_model_pa = PolynomialApproximation(
+    inverse_link_function=inverse_link,
+    n_basis_funcs=n_basis_funcs,
+    n_batches_scan=n_batches_scan,
+    history_window=history_window,
+    window_size=window_size,
+    approx_interval=interval,
+)
 
 tt0 = perf_counter()
 model_pa = ContinuousPA(solver_name="LBFGS", observation_model=obs_model_pa, solver_kwargs={"tol":1e-12}).fit_closed_form(X_spikes, y_spikes)
