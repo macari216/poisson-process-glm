@@ -45,6 +45,24 @@ def reshape_for_vmap(spikes, n_batches_scan):
     shifted_spikes = jnp.hstack(
         (spikes, padding)
     )
-    shifted_spikes_array = shifted_spikes.reshape(2,n_batches_scan,-1).transpose(1,2,0)
+    shifted_spikes_array = shifted_spikes.reshape(spikes.shape[0],n_batches_scan,-1).transpose(1,2,0)
 
     return shifted_spikes_array, padding.transpose(1,0)
+
+def compute_chebyshev(f, approx_interval, power=2, dx=0.01):
+    """jax only implementation"""
+    xx = jnp.arange(approx_interval[0] + dx / 2.0, approx_interval[1], dx)
+    nx = xx.shape[0]
+    xxw = jnp.arange(-1.0 + 1.0 / nx, 1.0, 1.0 / (0.5 * nx))
+    Bx = jnp.zeros([nx, power + 1])
+    for i in range(0, power + 1):
+        Bx = Bx.at[:, i].set(jnp.power(xx, i))
+    errwts_cheby = 1.0 / jnp.sqrt(1 - xxw ** 2)
+    Dx = jnp.diag(errwts_cheby)
+    fx = f(xx)
+    coef_cheby = jnp.linalg.lstsq(Bx.T @ Dx @ Bx, Bx.T @ Dx @ fx, rcond=None)[0]
+    return coef_cheby
+
+def quadratic(x, f, interval):
+    coefs = compute_chebyshev(f, interval, power=2, dx=0.01)
+    return coefs[0]+coefs[1]*x + coefs[2]*(x**2)
