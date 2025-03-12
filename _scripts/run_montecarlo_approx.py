@@ -139,11 +139,14 @@ model_exact = nmo.glm.GLM(
     observation_model=obs_model_exact,
     solver_kwargs={"tol": 1e-12, "acceleration": False, "stepsize": 1e-5})
 n_iter = 1000
+bst = np.append(np.tile(np.arange(0,int(tot_time_sec/binsize),100000), 10), np.array([int(tot_time_sec/binsize)]))
+
 params = model_exact.initialize_params(X_spikes, y_spikes)
 state = model_exact.initialize_state(X_spikes, y_spikes, params)
 error_exact = np.zeros(num_iter)
 for step in range(n_iter):
-    params, state = model_exact.update(params, state, X_spikes, y_spikes)
+    xb, yb = X[bst[step]:bst[step+1]], y_counts[bst[step]:bst[step+1]]
+    params, state = model_exact.update(params, state, xb, yb)
     error_exact[step] = state.error
     if step % 20 == 0:
         print(f"step {step}, time: {t1 - t0}, error: {error[step]}")
@@ -201,7 +204,7 @@ plt.tight_layout()
 
 
 #compare filters
-fig, axs = plt.subplots(5,2,figsize=(7,9))
+fig, axs = plt.subplots(3,2,figsize=(7,9))
 # fig, axs = plt.subplots(1,2,figsize=(7,5))
 axs = axs.flat
 for n, ax in enumerate(axs):

@@ -1,133 +1,184 @@
+import os
 import jax
 import jax.numpy as jnp
 import nemos as nmo
 import numpy as np
-import pynapple as nap
-from scipy.integrate import simpson
+import matplotlib.pyplot as plt
+from time import perf_counter
 
-from poisson_point_process import raised_cosine_log_eval
-from poisson_point_process.polynomial_approx import (
-    compute_chebyshev,
-    precompute_Phi_x,
-    run_scan_fn_k,
-    run_scan_fn_M,
-)
-from poisson_point_process.utils import compute_max_window_size
+import paglm.core as paglm
+
+from poisson_point_process import simulate
+from poisson_point_process.poisson_process_glm import ContinuousPA
+from poisson_point_process.poisson_process_obs_model import PolynomialApproximation
+from poisson_point_process.utils import quadratic
 
 jax.config.update("jax_enable_x64", True)
-### mainf
+os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
 # generate data
-n_neurons = 2
-spk_hz = 200
-tot_time_sec = 1000
-tot_spikes_n = int(tot_time_sec * spk_hz * n_neurons)
+n_neurons = 5
 history_window = 0.004
+tot_time_sec = 1000
 binsize = 0.0001
 window_size = int(history_window / binsize)
-n_basis_funcs = 5
-print(f"total spikes: {tot_spikes_n}")
+n_basis_funcs = 4
+n_bins_tot = int(tot_time_sec / binsize)
+n_batches_scan = 1
+rc_basis = nmo.basis.RaisedCosineLogConv(n_basis_funcs, window_size=window_size)
+time, kernels = rc_basis.evaluate_on_grid(window_size)
+time *= history_window
+# inverse_link = jax.nn.softplus
+# link_f = lambda x: jnp.log(jnp.exp(x) -1.)
+inverse_link = jnp.exp
+link_f = jnp.log
 
 np.random.seed(123)
 
-# full dataset
-tot_spikes = np.sort(np.random.uniform(0, tot_time_sec, size=tot_spikes_n))
-neuron_ids = np.random.choice(n_neurons, size=len(tot_spikes))
+####
+pres_rate_per_sec = 6
+posts_rate_per_sec = 4
+# rescaled proportionally to the binsize
+bias_true = posts_rate_per_sec + np.log(binsize)
+weights_true = np.random.normal(0, 0.3, n_neurons * n_basis_funcs)
+# weights_true = jnp.array([0.5,0.3,0.2,0.4])
+X, y_counts, X_counts, lam_posts = simulate.poisson_counts(pres_rate_per_sec, posts_rate_per_sec, binsize,
+                                                           n_bins_tot, n_neurons, weights_true, window_size, rc_basis,
+                                                           inverse_link)
 
-# postsynaptic neuron
-target_neu_id = 1
-posts_spk_idx = jnp.arange(len(tot_spikes))[neuron_ids == target_neu_id]
-posts_spikes = tot_spikes[posts_spk_idx]
-n_posts_spikes = posts_spikes.size
+print(f"mean spikes per neuron: {jnp.mean(jnp.hstack((y_counts[:, None], X_counts)).sum(0))}")
+print(f"max spikes per bin: {jnp.hstack((y_counts[:, None], X_counts)).max()}")
+print(f"ISI (ms): {tot_time_sec*1000 / jnp.mean(jnp.hstack((y_counts[:, None], X_counts)).sum(0))}")
+# plt.plot(lam_posts)
 
-# presynaptic neuron
-pres_spk_idx = jnp.arange(len(tot_spikes))[neuron_ids != target_neu_id]
-pres_spikes = tot_spikes[pres_spk_idx]
-n_pres_spikes = pres_spikes.size
-print(f"presynaptic spikes: {n_pres_spikes}")
+spike_times, spike_ids = simulate.poisson_times(X_counts, tot_time_sec, binsize)
+spike_times_y, _ = simulate.poisson_times(y_counts[:, None], tot_time_sec, binsize)
+X_spikes = jnp.vstack((spike_times, spike_ids))
+target_idx = jnp.searchsorted(X_spikes[0], spike_times_y)
+y_spikes = jnp.vstack((spike_times_y, target_idx))
 
-# compute sufficient statistics
-# basis functions binning
-# (this will be useful with nonparamatric basis functions e.g. GP basis)
-x = jnp.linspace(0, history_window, window_size)
+X_bias = jnp.concatenate((X, jnp.ones([X.shape[0], 1])), axis=1)
+X_discrete = X_bias
+y_discrete = y_counts
 
-# m linear cumulative contributions
-# m = n_pres_spikes * raised_cosine_log_eval(x, history_window, n_basis_funcs).sum(0)
-m = n_pres_spikes * simpson(
-    raised_cosine_log_eval(-x, history_window, n_basis_funcs), x=x, axis=0
-)
-
-# M interaction matrix
-max_window = compute_max_window_size(jnp.array([-history_window, 0]), tot_spikes, tot_spikes)
-max_window = int(max_window)
-
-delta_idx = jax.nn.relu(max_window - pres_spk_idx[0])
-# pres_idx_new = pres_spk_idx + delta_idx
-pres_spikes_new = jnp.hstack((jnp.full(delta_idx, history_window + 1), pres_spikes))
-posts_idx_new = posts_spk_idx + delta_idx
-tot_spikes_new = np.hstack((jnp.full(delta_idx, history_window + 1), tot_spikes))
-neuron_ids_new = np.hstack((jnp.full(delta_idx, -1), neuron_ids))
-
-Phi_x = precompute_Phi_x(x, window_size, n_basis_funcs, history_window)
-
-M = run_scan_fn_M(x, Phi_x, pres_spikes_new, max_window, delta_idx, n_pres_spikes)
-
-# ## test for scan (it works)
-M_loop = np.zeros((n_basis_funcs, n_basis_funcs))
-for idx in range(delta_idx, n_pres_spikes + delta_idx):
-    dts = pres_spikes_new[idx - max_window : idx] - pres_spikes_new[idx]
-    dts_idx = jnp.argmin(jnp.abs(x[None, :] - jnp.abs(dts[:, None])), axis=1)
-    cross_prod_sum = jnp.sum(Phi_x[dts_idx], axis=0)
-    M_loop = M_loop + Phi_x[0] + 2 * cross_prod_sum
-
-print(jnp.allclose(M_loop, M))
-
-# # k event cumulative contributions
-k = run_scan_fn_k(
-    pres_spikes,
-    n_posts_spikes,
-    delta_idx,
-    posts_spikes,
-    pres_spikes_new,
-    max_window,
-    history_window,
-    n_basis_funcs,
-)
 
 # compute coefficients
-bounds = [-2, 2]
-f = jnp.exp
-nonlin_center = [
-    np.log(n_posts_spikes / tot_time_sec) + bounds[0],
-    np.log(n_posts_spikes / tot_time_sec) + bounds[1],
-]
-coefs = compute_chebyshev(f, nonlin_center, power=2, dx=binsize)
+bounds = [-0.5,0.5]
 
-# model params
-# here we only fit the weights from presynaptic neuron (0)
-# to postsynaptic neuron (1) ignoring the self (1 to 1) weights
-# w = jnp.zeros(n_basis_funcs)
-w = jnp.array(0.01 * np.random.randn(n_basis_funcs))
+mean_rate = spike_times_y.size / tot_time_sec
+# interval = [
+#     float(link_f(mean_rate) + bounds[0]),
+#     float(link_f(mean_rate) + bounds[1]),
+# ]
+# interval_discrete = [
+#     float(link_f(mean_rate*binsize) + bounds[0]),
+#     float(link_f(mean_rate*binsize) + bounds[1]),
+# ]
+interval = [np.percentile(link_f(lam_posts/binsize), 2.5), np.percentile(link_f(lam_posts/binsize), 97.5)]
+interval_discrete = [np.percentile(link_f(lam_posts), 2.5), np.percentile(link_f(lam_posts), 97.5)]
+# print([np.percentile(link_f(lam_posts/binsize), 2.5), np.percentile(link_f(lam_posts/binsize), 97.5)])
+print(interval)
+print(interval_discrete)
 
-# integral
-linear_term = jnp.dot(m, w)
-quadratic_term = np.dot(w, np.dot(M, w))
-approx_integral = coefs[0] + coefs[1] * linear_term + coefs[2] * quadratic_term
+x = jnp.arange(interval[0], interval[1], 0.01)
+plt.figure()
+plt.plot(x, inverse_link(x), c='k', label="exact nonlinearity")
+plt.plot(x, quadratic(x, inverse_link, interval), c='r', label="approximation")
+plt.legend()
+plt.show()
 
-### test: compare to the exact integral of a quadratic nonlinearity
-spikes_dict = {0: pres_spikes, 1: posts_spikes}
-spikes_tsgroup = nap.TsGroup(spikes_dict, nap.IntervalSet(0, tot_time_sec))
-y_count = spikes_tsgroup.count(binsize)
-rc_basis = nmo.basis.RaisedCosineBasisLog(n_basis_funcs, "eval")
-X = rc_basis.compute_features(y_count[:, 0])
-X = jnp.array(X)
-dot_prod = jnp.dot(X, w)[40:]
-exact_integral = (
-    tot_time_sec * coefs[0]
-    + coefs[1] * simpson(dot_prod, x=y_count.t[40:])
-    + coefs[2] * simpson(jnp.square(dot_prod), x=y_count.t[40:])
-)
+# interval_discrete = [np.percentile(inv_rates, 5), np.percentile(inv_rates, 95)]
 
-# print(approx_integral)
-# print(exact_integral)
-print(np.allclose(approx_integral, exact_integral))
+# interval = interval_discrete
+
+obs_model_kwargs_pa = {
+    "n_basis_funcs": n_basis_funcs,
+    "history_window": history_window,
+    "n_batches_scan": n_batches_scan,
+    "eval_function": "RaisedCosineLog",
+    "window_size": window_size,
+    "approx_interval": interval
+}
+
+obs_model_pa = PolynomialApproximation(obs_model_kwargs=obs_model_kwargs_pa, inverse_link_function=inverse_link)
+
+tt0 = perf_counter()
+model_pa = ContinuousPA(solver_name="LBFGS", observation_model=obs_model_pa, solver_kwargs={"tol":1e-12}).fit_closed_form(X_spikes, y_spikes)
+print(f"fit continuous PA GLM model, {perf_counter() - tt0}")
+
+obs_model_exact = nmo.observation_models.PoissonObservations(inverse_link)
+tt0 = perf_counter()
+model_exact = nmo.glm.GLM(solver_name="LBFGS",observation_model=obs_model_exact,solver_kwargs={"tol":1e-12}).fit(X, y_discrete)
+print(f"fit discrete GLM model, {perf_counter() - tt0}")
+
+def sufficient_stats(X, y):
+    sum_x = np.sum(X, axis=0)
+    sum_yx = np.sum(y[:, np.newaxis] * X, axis=0)
+    sum_xxT = X.T @ X
+    sym_yxxT = X.T @ (y[:, np.newaxis] * X)
+
+    return [sum_x, sum_yx, sum_xxT, sym_yxxT]
+
+tt0 = perf_counter()
+suff_discrete = sufficient_stats(X_bias, y_discrete)
+weights_d, interval_d = paglm.fit_paglm(inverse_link, suff_discrete, [interval_discrete])
+print(f"fit discrete PA GLM model, {perf_counter() - tt0}")
+
+weights_paglm, bias_paglm = weights_d[:-1].reshape(n_neurons,n_basis_funcs), weights_d[-1]
+weights_nemos, bias_nemos = model_exact.coef_.reshape(-1,n_basis_funcs), model_exact.intercept_
+weights_pa, bias_pa = model_pa.coef_.reshape(-1,n_basis_funcs), model_pa.intercept_
+
+filters_pa = np.dot(weights_pa, kernels.T) + bias_pa
+filters_paglm = np.dot(weights_paglm, kernels.T) + bias_paglm
+filters_nemos = np.dot(weights_nemos, kernels.T) + bias_nemos
+filters_true = np.dot(weights_true.reshape(-1,n_basis_funcs), kernels.T) + bias_true
+
+# scores
+pred_pa = model_pa.predict(X_spikes, binsize)
+pred_paglm = quadratic(np.dot(X, weights_d[:-1])+weights_d[-1], inverse_link, interval_discrete)
+pred_exact = model_exact.predict(X)
+print(f"continuous PA GLM pseudo-r2 score: {np.round(obs_model_exact.pseudo_r2(y_counts, pred_pa*binsize, score_type="pseudo-r2-Cohen"), 5)}")
+print(f"discrete GLM pseudo-r2  score: {np.round(obs_model_exact.pseudo_r2(y_counts, pred_exact, score_type="pseudo-r2-Cohen"), 5)}")
+print(f"discrete PA GLM pseudo-r2  score: {np.round(obs_model_exact.pseudo_r2(y_counts, pred_paglm, score_type="pseudo-r2-Cohen"), 5)}")
+
+#compare predicted rate
+def select_spk(spikes, ep):
+    return spikes[0, (spikes[0]>ep[0]*binsize)&(spikes[0]<ep[1]*binsize)]/binsize
+eps = [(260000,270000),(710000,720000)]
+fig, axs = plt.subplots(2,1, figsize=(12,6))
+for i, ax in enumerate(axs):
+    ax.plot(np.arange(eps[i][0],eps[i][1]), lam_posts[eps[i][0]:eps[i][1]]/binsize, c='g', lw=0.5, label="true")
+    ax.plot(np.arange(eps[i][0],eps[i][1]), pred_exact[eps[i][0]:eps[i][1]]/binsize, c='k', lw=0.5, label="exact")
+    ax.plot(np.arange(eps[i][0], eps[i][1]), pred_paglm[eps[i][0]:eps[i][1]]/binsize, c='b', lw=0.5, label="pa discrete")
+    ax.plot(np.arange(eps[i][0], eps[i][1]), pred_pa[eps[i][0]:eps[i][1]], c='r', lw=0.5, label="pa continuous")
+    ax.vlines(select_spk(y_spikes, eps[i]), -10, pred_pa[eps[i][0]:eps[i][1]].min(), color='darkblue', lw=0.8, label="spikes")
+    ax.set_xlabel("time (s)")
+    ax.set_ylabel("firing rate (Hz)")
+axs[0].legend(loc="upper right")
+plt.tight_layout()
+
+# compare filters
+fig, axs = plt.subplots(3,2,figsize=(7,9))
+axs = axs.flat
+for n, ax in enumerate(axs):
+    if n==0:
+        x = jnp.arange(interval[0], interval[1], 0.01)
+        ax.plot(x, inverse_link(x), c='k', label="exact nonlinearity")
+        ax.plot(x,quadratic(x, inverse_link, interval), c='r', label="approximation")
+        ax.legend()
+    else:
+        line1 = ax.plot(time, inverse_link(filters_true[n-1])/binsize, c='g', label='true')
+        line2 = ax.plot(time, inverse_link(filters_nemos[n-1])/binsize, c='k', label='exact discrete')
+        line3 = ax.plot(time, quadratic(filters_pa[n-1], inverse_link, interval), c='r', label='pa continuous')
+        line4 = ax.plot(time, quadratic(filters_paglm[n-1], inverse_link, interval_discrete)/binsize, c='b', label='pa discrete')
+        ax.set_xlabel("time from spike")
+        ax.set_ylabel("gain")
+
+        if n==1:
+            lines = [line1[0], line2[0], line3[0], line4[0]]
+            labels = [l.get_label() for l in lines]
+            ax.legend(lines, labels, loc="upper right")
+
+plt.tight_layout()
+plt.show()
+
