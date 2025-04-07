@@ -12,6 +12,7 @@ from nemos.observation_models import Observations
 from nemos.typing import DESIGN_INPUT_TYPE
 
 from . import utils
+from .basis import laguerre_int, laguerre_prod_int
 
 class MonteCarloApproximation(Observations):
 
@@ -277,6 +278,8 @@ class PolynomialApproximation(MonteCarloApproximation):
             n_batches_scan,
             history_window,
             eval_function,
+            int_function = laguerre_int,
+            prod_int_function = laguerre_prod_int,
             window_size=None,
             approx_interval=None,
             inverse_link_function=jnp.exp,
@@ -297,6 +300,8 @@ class PolynomialApproximation(MonteCarloApproximation):
         self.n_batches_scan = n_batches_scan
         self.history_window = history_window
         self.eval_function = eval_function
+        self.prod_int_function = prod_int_function
+        self.int_function = int_function
         # model specific
         self.window_size = window_size
         self.approx_interval = approx_interval
@@ -315,37 +320,11 @@ class PolynomialApproximation(MonteCarloApproximation):
         if self.suff is None:
             self.suff = self.suff_stats(X)
 
-    def compute_m(self, spikes_n, x):
-        phi_eval = self.eval_function(-x)
-        phi_int = jnp.array(simpson(phi_eval, x=x, axis=0))
-        # phi_int = jnp.array(phi_eval.sum(0)) * 0.0001
+    def compute_m(self, spikes_n):
+        phi_int = self.int_function(-self.history_window, self.history_window, self.n_basis_funcs)
         return (spikes_n[:, None] * phi_int).ravel()
 
-    def phi_product_int(self, delta_idx, x):
-        """compute int(phi(tau)phi(tau-delta_x))dtau"""
-        # set bounds to the overlap interval
-        x1 = x[delta_idx:]
-        x2 = x[:self.window_size - delta_idx]
-
-        phi_ts1 = self.eval_function(-x1)
-        phi_ts2 = self.eval_function(-x2)
-
-        phi_products = phi_ts1[:, :, None] * phi_ts2[:, None, :]
-
-        return simpson(phi_products, x=x1, axis=0)
-        # return phi_products.sum(0)
-
-    def precompute_Phi_x(self, x):
-        """precompute M_ts_ts' for all possible deltas"""
-        M_x = []
-
-        for delta_x in range(self.window_size):
-            M_x.append(self.phi_product_int(delta_x, x))
-
-        return jnp.stack(M_x)
-
-    def compute_M_block(self, x, Phi_x, tot_spikes, max_spikes, pair):
-        @jax.jit
+    def compute_M_block(self, tot_spikes, max_spikes, pair):
         def compute_Mn_half(pair):
             def valid_idx(M_scan, idx):
                 spk_in_window = utils.slice_array(
@@ -353,24 +332,27 @@ class PolynomialApproximation(MonteCarloApproximation):
                 )
                 dts = spk_in_window[0] - idx[0]
                 dts_valid = jnp.where(spk_in_window[1] == pair[0], dts, invalid_dts)
-                dts_idx = jnp.argmin(jnp.abs(x[None, :] - jnp.abs(dts_valid[:, None])), axis=1)
-                cross_prod_sum = jnp.sum(Phi_x[dts_idx], axis=0)
+                cross_prod_sum = self.prod_int_function(dts_valid, self.history_window, self.n_basis_funcs).sum(0)
                 M_scan = M_scan + cross_prod_sum
                 return M_scan
 
             def invalid_idx(M_scan, idx):
-                M_scan += jnp.zeros_like(Phi_x[0])
+                M_scan += jnp.zeros((self.n_basis_funcs, self.n_basis_funcs))
                 return M_scan
 
             def scan_fn(M_scan, idx):
                 M_scan = jax.lax.cond(idx[1].astype(int) > tot_spikes.shape[1], invalid_idx, valid_idx, M_scan, idx)
                 return M_scan, None
 
-            scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.zeros_like(Phi_x[0]), idxs), in_axes=1)
+            scan_vmap = jax.vmap(
+                lambda idxs: jax.lax.scan(scan_fn, jnp.zeros((self.n_basis_funcs, self.n_basis_funcs)), idxs),
+                in_axes=1
+            )
 
             post_idx = jnp.nonzero(tot_spikes[1] == pair[1], size=max_spikes, fill_value=tot_spikes.shape[1] + 5)[0]
-            post_idx_array, padding = utils.reshape_for_vmap(jnp.vstack((tot_spikes[0, post_idx], post_idx)), self.n_batches_scan)
-            invalid_dts = jnp.tile(x[-1] + 1, self.max_window)
+            post_idx_array, padding = utils.reshape_for_vmap(jnp.vstack((tot_spikes[0, post_idx], post_idx)),
+                                                             self.n_batches_scan)
+            invalid_dts = jnp.tile(-self.history_window - 1, self.max_window)
             out, _ = scan_vmap(post_idx_array)
             sub, _ = scan_vmap(padding[None, :])
 
@@ -405,21 +387,20 @@ class PolynomialApproximation(MonteCarloApproximation):
     def compute_M(
             self,
             spikes_n,
-            x,
-            Phi_x,
             tot_spikes,
             neuron_ids,
     ):
         self_pairs = jnp.array(list(zip(neuron_ids, neuron_ids)))
-        cross_pairs = jnp.array(list(combinations(neuron_ids, 2)))
+        cross_pairs = jnp.array(list(utils.jax_pairs(neuron_ids)))
 
-        self_products = jnp.einsum("i,jk->ijk", spikes_n, Phi_x[0])
+        self_products = jnp.einsum("i,jk->ijk", spikes_n,
+                                   self.prod_int_function(jnp.array([0]), self.history_window, self.n_basis_funcs)[0])
 
-        M_block_pair = lambda p: self.compute_M_block(x, Phi_x, tot_spikes, int(spikes_n.max()), p)
+        M_block_pair = lambda p: self.compute_M_block(tot_spikes, int(spikes_n.max()), p)
 
         M_self = jax.vmap(M_block_pair)(self_pairs)
         M_self += self_products
-        M_cross = jax.vmap(M_block_pair)(cross_pairs) if len(cross_pairs)!=0 else None
+        M_cross = jax.vmap(M_block_pair)(cross_pairs) if len(cross_pairs) != 0 else None
 
         M_full = self.construct_M(M_self, M_cross)
         return M_full
@@ -433,14 +414,9 @@ class PolynomialApproximation(MonteCarloApproximation):
         """
         neuron_ids, spikes_n = jnp.unique(X[1, self.max_window:], return_counts=True)
 
-        x = jnp.linspace(0, self.history_window, self.window_size)
-        Phi_x = self.precompute_Phi_x(x)
-
-        m = self.compute_m(spikes_n, x)
+        m = self.compute_m(spikes_n)
         M = self.compute_M(
             spikes_n,
-            x,
-            Phi_x,
             X,
             neuron_ids
         )
