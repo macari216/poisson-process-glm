@@ -32,16 +32,18 @@ def poisson_counts(mean_per_sec, bias_per_sec, binsize, n_bins_tot, n_pres, weig
 
     np.random.seed(seed)
     lam_pres = np.abs(np.random.normal(mean_per_sec, mean_per_sec/10, n_pres))
-    bias_posts = bias_per_sec + np.log(binsize)
+    bias_posts = np.log(bias_per_sec) + np.log(binsize)
 
     weights_true = jnp.array(weights_true)
     bias_posts = jnp.array(bias_posts)
 
     rate_per_bin = lam_pres * binsize
     pres_spikes = jnp.array(np.random.poisson(lam=rate_per_bin, size=(n_bins_tot, n_pres)))
+    # uniform spacing
     # pres_spikes = np.zeros((n_bins_tot, n_pres))
     # pres_spikes[::5*ws] = np.ones(n_pres)
-    X = basis.compute_features(jnp.array(pres_spikes))
+    # X = basis.compute_features(jnp.array(pres_spikes))
+    X = nmo.convolve.create_convolutional_predictor(basis, jnp.array(pres_spikes)).reshape(n_bins_tot, -1)
     X = X[ws:]
     lam_posts = nonlin(np.dot(X, weights_true) + bias_posts)
     posts_spikes = jnp.array(np.random.poisson(lam=lam_posts, size=len(lam_posts)))
@@ -76,7 +78,7 @@ def poisson_times(counts, tot_time_sec, binsize, random_key=jax.random.PRNGKey(0
     are uniformly distributed within bins (memoryless property of poisson process)"""
 
     n_bins_tot, n_neurons = counts.shape
-    bin_starts = jnp.linspace(0, tot_time_sec, n_bins_tot, endpoint=False)
+    bin_starts = jnp.linspace(binsize, tot_time_sec, int(tot_time_sec / binsize)) - binsize/2
 
     repeated_bins = jnp.repeat(bin_starts, counts.sum(1).astype(int))
     random_offsets = jax.random.uniform(
