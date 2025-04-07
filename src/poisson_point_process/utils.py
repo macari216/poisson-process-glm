@@ -5,6 +5,8 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+from jax.scipy.special import gammaln
+from itertools import combinations
 
 
 @jax.jit
@@ -66,3 +68,9 @@ def compute_chebyshev(f, approx_interval, power=2, dx=0.01):
 def quadratic(x, f, interval):
     coefs = compute_chebyshev(f, interval, power=2, dx=0.01)
     return coefs[0]+coefs[1]*x + coefs[2]*(x**2)
+
+def comb(N, k):
+    return jax.lax.exp(gammaln(N + 1) - gammaln(k + 1) - gammaln(N + 1 - k))
+
+def jax_pairs(neuron_ids):
+    return jnp.array(list(combinations(neuron_ids, 2)))
