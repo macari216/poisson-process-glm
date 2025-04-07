@@ -12,6 +12,7 @@ from poisson_point_process import simulate
 from poisson_point_process.poisson_process_glm import ContinuousPA
 from poisson_point_process.poisson_process_obs_model import PolynomialApproximation
 from poisson_point_process.utils import quadratic
+from poisson_point_process.basis import RaisedCosineLogEval, LaguerreEval
 
 jax.config.update("jax_enable_x64", True)
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
@@ -25,30 +26,35 @@ window_size = int(history_window / binsize)
 n_basis_funcs = 4
 n_bins_tot = int(tot_time_sec / binsize)
 n_batches_scan = 1
-rc_basis = nmo.basis.RaisedCosineLogConv(n_basis_funcs, window_size=window_size)
-time, kernels = rc_basis.evaluate_on_grid(window_size)
-time *= history_window
+# rc_basis = nmo.basis.RaisedCosineLogConv(n_basis_funcs, window_size=window_size)
+# time, kernels = rc_basis.evaluate_on_grid(window_size)
+# time *= history_window
 # inverse_link = jax.nn.softplus
 # link_f = lambda x: jnp.log(jnp.exp(x) -1.)
 inverse_link = jnp.exp
 link_f = jnp.log
 
+basis_fn = LaguerreEval(history_window, n_basis_funcs)
+time = jnp.linspace(0,history_window,window_size)
+kernels = basis_fn(-time)
+
 np.random.seed(123)
 
 ####
-pres_rate_per_sec = 6
-posts_rate_per_sec = 4
+pres_rate_per_sec = 10
+posts_rate_per_sec = 3
 # rescaled proportionally to the binsize
 bias_true = posts_rate_per_sec + np.log(binsize)
+posts_rate_sim = inverse_link(posts_rate_per_sec + np.log(binsize)) / binsize
 weights_true = np.random.normal(0, 0.3, n_neurons * n_basis_funcs)
 # weights_true = jnp.array([0.5,0.3,0.2,0.4])
 X, y_counts, X_counts, lam_posts = simulate.poisson_counts(pres_rate_per_sec, posts_rate_per_sec, binsize,
-                                                           n_bins_tot, n_neurons, weights_true, window_size, rc_basis,
+                                                           n_bins_tot, n_neurons, weights_true, window_size, kernels,
                                                            inverse_link)
 
-print(f"mean spikes per neuron: {jnp.mean(jnp.hstack((y_counts[:, None], X_counts)).sum(0))}")
+print(f"X spikes: {X_counts.sum(0)}, y spikes: {y_counts.sum()}")
 print(f"max spikes per bin: {jnp.hstack((y_counts[:, None], X_counts)).max()}")
-print(f"ISI (ms): {tot_time_sec*1000 / jnp.mean(jnp.hstack((y_counts[:, None], X_counts)).sum(0))}")
+print(f"ISI (ms): {tot_time_sec*1000 / jnp.mean(y_counts.sum(0))}")
 # plt.plot(lam_posts)
 
 spike_times, spike_ids = simulate.poisson_times(X_counts, tot_time_sec, binsize)
@@ -98,6 +104,7 @@ obs_model_pa = PolynomialApproximation(
     history_window=history_window,
     window_size=window_size,
     approx_interval=interval,
+    eval_function=basis_fn,
 )
 
 tt0 = perf_counter()

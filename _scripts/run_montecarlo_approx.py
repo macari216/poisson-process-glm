@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from poisson_point_process import simulate
 from poisson_point_process.poisson_process_glm import ContinuousMC
 from poisson_point_process.poisson_process_obs_model import MonteCarloApproximation
+from poisson_point_process.basis import gp_basis, ChebyshevInterpolation, RaisedCosineLogEval
 
 jax.config.update("jax_enable_x64", True)
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
@@ -19,7 +20,7 @@ all_to_all = False
 
 # generate data
 n_neurons = 5
-target_neu_id = 0
+target_neu_id = 5
 history_window = 0.004
 tot_time_sec = 1000
 binsize = 0.0001
@@ -28,9 +29,10 @@ n_basis_funcs = 4
 n_bins_tot = int(tot_time_sec / binsize)
 n_batches_scan = 1
 rc_basis = nmo.basis.RaisedCosineLogConv(n_basis_funcs, window_size=window_size)
-time, kernels = rc_basis.evaluate_on_grid(window_size)
+time, rc_kernels = rc_basis.evaluate_on_grid(window_size)
 time *= history_window
-inverse_link = jnp.exp
+inverse_link = jax.nn.softplus
+link_f = lambda x: jnp.log(jnp.exp(x) -1.)
 
 np.random.seed(216)
 
@@ -39,15 +41,15 @@ if all_to_all:
     # all-to-all connectivity (bias and weights)
 
     # true parameters
-    baseline_fr = 2.1
+    baseline_fr = 0.9
     biases = jnp.array(np.abs(np.random.normal(baseline_fr, baseline_fr / 10, n_neurons))) + np.log(binsize)
     bias_true = biases[target_neu_id]
     posts_rate_per_sec = biases[target_neu_id] - np.log(binsize)
 
-    weights_true = jnp.array(np.random.normal(0, 0., size=(n_neurons, n_neurons, n_basis_funcs)))
+    weights_true = jnp.array(np.random.normal(0, 0.1, size=(n_neurons, n_neurons, n_basis_funcs)))
     params = (weights_true, biases)
 
-    spike_counts, rates = simulate.poisson_counts_recurrent(n_bins_tot, n_neurons, window_size, kernels, params, inverse_link)
+    spike_counts, rates = simulate.poisson_counts_recurrent(n_bins_tot, n_neurons, window_size, rc_kernels, params, inverse_link)
 
     print(f"total spikes: {spike_counts.sum()}, y spikes: {spike_counts[:, target_neu_id].sum()}")
     print(f"mean spikes per neuron: {jnp.mean(spike_counts.sum(0))}")
@@ -77,7 +79,7 @@ else:
     weights_true = jnp.array(np.random.normal(0, 0.5, n_neurons * n_basis_funcs))
     # weights_true = jnp.array([0.8, 0.5])
     X, y_counts, X_counts, lam_posts = simulate.poisson_counts(pres_rate_per_sec, posts_rate_per_sec, binsize,
-                                               n_bins_tot, n_neurons, weights_true, window_size, rc_basis, inverse_link)
+                                               n_bins_tot, n_neurons, weights_true, window_size, kernels, inverse_link)
     inv_rates = np.log(np.exp(lam_posts) - 1)
     print(f"y spikes total: {y_counts.sum()}")
     print(f"X spikes total: {X_counts.sum()}")
@@ -96,11 +98,18 @@ else:
 
 print(f"generated data: {np.round(perf_counter() - t0, 5)}")
 
+# polynomial basis
+gp_kernels, gp_var, grid = gp_basis(window_size, n_basis_funcs, w=0.065, len_sc=0.12, rh=1, a=50, b=0.001, delay=0.0)
+kernels = gp_var * gp_kernels
+basis_fn = ChebyshevInterpolation(grid, kernels, history_window)
+# basis_fn = RaisedCosineLogEval(history_window, n_basis_funcs)
+
 obs_model = MonteCarloApproximation(
     n_basis_funcs=n_basis_funcs,
     n_batches_scan=n_batches_scan,
     history_window=history_window,
     mc_n_samples=y_spikes.shape[1] * 5,
+    eval_function=basis_fn,
 )
 
 # model = ContinuousMC(solver_name="GradientDescent", obs_model_kwargs=obs_model_kwargs, solver_kwargs={"has_aux": True, "acceleration": False, "stepsize": 1e-7})
@@ -113,7 +122,7 @@ true_params = (weights_true[target_neu_id].ravel(), jnp.array([posts_rate_per_se
 params = model.initialize_params(X_spikes, y_spikes)
 state = model.initialize_state(X_spikes, y_spikes, params)
 
-num_iter = 1000
+num_iter = 100
 tt0 = perf_counter()
 error = np.zeros(num_iter)
 for step in range(num_iter):
@@ -128,35 +137,15 @@ print(f"fit model, {perf_counter() - tt0}")
 plt.plot(error)
 
 obs_model_exact = nmo.observation_models.PoissonObservations(inverse_link)
-# model_exact = nmo.glm.GLM(solver_name="LBFGS",observation_model=obs_model_exact,solver_kwargs={"tol":1e-12}).fit(X, y_counts)
-
-model_exact = nmo.glm.GLM(
-    solver_name="GradientDescent",
-    observation_model=obs_model_exact,
-    solver_kwargs={"tol": 1e-12, "acceleration": False, "stepsize": 1e-7})
-n_iter = 10000
-bsi = 1000000
-bst = np.tile(np.arange(0,int(tot_time_sec/binsize), bsi), 1000)
-np.random.shuffle(bst)
-params = model_exact.initialize_params(X[:bsi], y_counts[:bsi])
-state = model_exact.initialize_state(X[:bsi], y_counts[:bsi], params)
-error_exact = np.zeros(n_iter)
-for step in range(n_iter):
-    xb, yb = X[bst[step]:bst[step]+bsi], y_counts[bst[step]:bst[step]+bsi]
-    params, state = model_exact.update(params, state, xb, yb)
-    error_exact[step] = state.error
-    if step % 50 == 0:
-        print(f"step {step}, error: {error_exact[step]}")
-plt.plot(error_exact)
-plt.show()
+model_exact = nmo.glm.GLM(solver_name="LBFGS",observation_model=obs_model_exact,solver_kwargs={"tol":1e-12}).fit(X, y_counts)
 
 weights_nemos, bias_nemos = model_exact.coef_.reshape(-1,n_basis_funcs), model_exact.intercept_
+filters_nemos = np.dot(weights_nemos, rc_kernels.T) + bias_nemos
 weights_mc, bias_mc = model.coef_.reshape(-1,n_basis_funcs), model.intercept_
 filters_mc = np.dot(weights_mc, kernels.T) + bias_mc
-filters_nemos = np.dot(weights_nemos, kernels.T) + bias_nemos
 if len(weights_true.shape) == 3:
     weights_true = weights_true[target_neu_id]
-filters_true = np.dot(weights_true.reshape(-1,n_basis_funcs), kernels.T) + bias_true
+filters_true = np.dot(weights_true.reshape(-1,n_basis_funcs), rc_kernels.T) + bias_true
 
 print(f"true weights: {weights_true, bias_true} ({posts_rate_per_sec})")
 print(f"MC weights: {model.coef_, model.intercept_}")
@@ -211,7 +200,7 @@ for n, ax in enumerate(axs):
         ax.set_ylabel("loss")
     else:
         line1 = ax.plot(time, inverse_link(filters_true[n-1])/binsize, c='g', label='true')
-        line2 = ax.plot(time, inverse_link(filters_nemos[n-1]/binsize), c='k', label='exact')
+        line2 = ax.plot(time, inverse_link(filters_nemos[n-1])/binsize, c='k', label='exact')
         line3 = ax.plot(time, inverse_link(filters_mc[n-1]), c='r', label='approx')
         ax.set_xlabel("time from spike")
         ax.set_ylabel("gain")

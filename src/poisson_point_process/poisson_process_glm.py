@@ -9,15 +9,9 @@ import jax
 import jax.numpy as jnp
 import jaxopt
 
-from functools import partial
-from itertools import combinations
-
 from . import utils
 from . import poisson_process_obs_model as obs
-from .basis import raised_cosine_log_eval
 from .base_regressor_MC import BaseRegressor
-
-from scipy.integrate import simpson
 
 from nemos import tree_utils, validation
 from nemos.pytrees import FeaturePytree
@@ -379,10 +373,11 @@ class ContinuousMC(BaseRegressor):
             self,
             X: Union[DESIGN_INPUT_TYPE, ArrayLike],
             bin_size: Optional=0.001,
+            time_sec: Optional=None,
     ) -> jnp.ndarray:
         """Predict rates based on fit parameters."""
 
-        return self.observation_model._predict(X, (self.coef_, self.intercept_), bin_size)
+        return self.observation_model._predict(X, (self.coef_, self.intercept_), bin_size, time_sec)
 
     def score(
             self,
@@ -596,10 +591,11 @@ class ContinuousPA(ContinuousMC):
             self,
             X: Union[DESIGN_INPUT_TYPE, ArrayLike],
             bin_size: Optional=0.001,
+            time_sec: Optional = None,
     ) -> jnp.ndarray:
         """Predict rates based on fit parameters."""
 
-        return self.observation_model._predict(X, (self.coef_, self.intercept_), bin_size)
+        return self.observation_model._predict(X, (self.coef_, self.intercept_), bin_size, time_sec)
 
     def score(
             self,

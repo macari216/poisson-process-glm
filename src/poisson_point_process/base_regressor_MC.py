@@ -356,7 +356,7 @@ class BaseRegressor(Base, abc.ABC):
             init_params: Tuple[DESIGN_INPUT_TYPE, jnp.ndarray], random_key, *run_args: jnp.ndarray
         ) -> jaxopt.OptStep:
             if solver_kwargs.get("has_aux", False):
-                return solver.run(init_params, random_key=random_key, *args, *run_args, **solver_run_kwargs, )
+                return solver.run(init_params, random_key=random_key, *args, *run_args, **solver_run_kwargs)
             else:
                 return solver.run(init_params, *args, *run_args, **solver_run_kwargs)
 
