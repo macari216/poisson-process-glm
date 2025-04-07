@@ -1,4 +1,3 @@
-import abc
 from typing import Callable, Optional, Union, Tuple
 from numpy.typing import ArrayLike
 
@@ -9,18 +8,10 @@ import jax.numpy as jnp
 from scipy.integrate import simpson
 from itertools import combinations
 
-from nemos import utils as nemosutils
 from nemos.observation_models import Observations
 from nemos.typing import DESIGN_INPUT_TYPE
 
 from . import utils
-from .basis import raised_cosine_log_eval
-
-# dictionary of eval functions.
-EVAL_FUNCS = {
-    "RaisedCosineLog": raised_cosine_log_eval,
-    "Polynomial": lambda x: jnp.log(jnp.exp(x) - 1.0), #TBA
-}
 
 class MonteCarloApproximation(Observations):
 
@@ -29,9 +20,9 @@ class MonteCarloApproximation(Observations):
             n_basis_funcs,
             n_batches_scan,
             history_window,
+            eval_function,
             mc_n_samples=None,
             inverse_link_function=jnp.exp,
-            eval_function=raised_cosine_log_eval,
     ):
         super().__init__(inverse_link_function=inverse_link_function)
         self.scale = 1.0
@@ -58,7 +49,7 @@ class MonteCarloApproximation(Observations):
     @partial(jax.jit, static_argnames=("self",))
     def sum_basis_and_dot(self, weights, dts):
         """compilable linear-non-linear transform"""
-        fx = self.eval_function(dts, self.history_window, self.n_basis_funcs)
+        fx = self.eval_function(dts)
         # return jnp.sum(fx * weights, axis=1)
         return jnp.sum(fx * weights)
 
@@ -68,12 +59,10 @@ class MonteCarloApproximation(Observations):
 
     def draw_mc_sample(self, X, M, random_key):
         """draw sample for a Monte-Carlo estimate of /int_0^T(lambda(t))dt"""
-        keys = jax.random.split(random_key, 2)
-        tau_m = jax.random.uniform(keys[0], shape=(M,), minval=0, maxval=self.T)
-        # valid_spikes = X[0, self.max_window:-self.max_window]
-        # s_m = jax.random.choice(keys[0], valid_spikes, shape=(M,), replace=True)
-        # epsilon_m = jax.random.uniform(keys[1], shape=(M,), minval=0.0, maxval=self.history_window)
-        # tau_m = s_m + epsilon_m
+
+        s_m, dt = jnp.linspace(0, self.T, M, retstep=True)
+        epsilon_m = jax.random.uniform(random_key, shape=(M,), minval=0.0, maxval=dt)
+        tau_m = s_m + epsilon_m
         tau_m_idx = jnp.searchsorted(X[0], tau_m)
         mc_spikes = jnp.vstack((tau_m, tau_m_idx))
 
@@ -143,6 +132,7 @@ class MonteCarloApproximation(Observations):
             X: Union[DESIGN_INPUT_TYPE, ArrayLike],
             params: Tuple[jnp.array, jnp.array],
             bin_size: Optional=0.001,
+            time_sec: Optional=None,
     ) -> jnp.ndarray:
         """Predict rates based on fit parameters."""
 
@@ -156,11 +146,14 @@ class MonteCarloApproximation(Observations):
             return self.linear_non_linear(dts, weights[spk_in_window[1].astype(int)], bias)
         intensity_function_vmap = jax.vmap(lambda idx: intensity_function(X, idx), in_axes=(1,))
 
+        if time_sec is None:
+            time_sec = self.T
+
         weights, bias = params
         weights = weights.reshape(-1, self.n_basis_funcs)
         X = utils.adjust_indices_and_spike_times(X, self.history_window, self.max_window)
 
-        bin_times = jnp.linspace(bin_size, self.T, int(self.T / bin_size)) - bin_size/2
+        bin_times = jnp.linspace(bin_size, time_sec, int(time_sec / bin_size)) - bin_size/2
         bin_idx = jnp.searchsorted(X[0], bin_times, "right")
         bin_array =  jnp.vstack((bin_times, bin_idx))
 
@@ -283,9 +276,9 @@ class PolynomialApproximation(MonteCarloApproximation):
             n_basis_funcs,
             n_batches_scan,
             history_window,
+            eval_function,
             window_size=None,
             approx_interval=None,
-            eval_function=raised_cosine_log_eval,
             inverse_link_function=jnp.exp,
     ):
         super().__init__(
@@ -323,7 +316,7 @@ class PolynomialApproximation(MonteCarloApproximation):
             self.suff = self.suff_stats(X)
 
     def compute_m(self, spikes_n, x):
-        phi_eval = raised_cosine_log_eval(-x, self.history_window, self.n_basis_funcs)
+        phi_eval = self.eval_function(-x)
         phi_int = jnp.array(simpson(phi_eval, x=x, axis=0))
         # phi_int = jnp.array(phi_eval.sum(0)) * 0.0001
         return (spikes_n[:, None] * phi_int).ravel()
@@ -334,13 +327,13 @@ class PolynomialApproximation(MonteCarloApproximation):
         x1 = x[delta_idx:]
         x2 = x[:self.window_size - delta_idx]
 
-        phi_ts1 = raised_cosine_log_eval(-x1, self.history_window, self.n_basis_funcs)
-        phi_ts2 = raised_cosine_log_eval(-x2, self.history_window, self.n_basis_funcs)
+        phi_ts1 = self.eval_function(-x1)
+        phi_ts2 = self.eval_function(-x2)
 
         phi_products = phi_ts1[:, :, None] * phi_ts2[:, None, :]
 
         return simpson(phi_products, x=x1, axis=0)
-        # return phi_products.sum(0) * 0.0001
+        # return phi_products.sum(0)
 
     def precompute_Phi_x(self, x):
         """precompute M_ts_ts' for all possible deltas"""
@@ -352,6 +345,7 @@ class PolynomialApproximation(MonteCarloApproximation):
         return jnp.stack(M_x)
 
     def compute_M_block(self, x, Phi_x, tot_spikes, max_spikes, pair):
+        @jax.jit
         def compute_Mn_half(pair):
             def valid_idx(M_scan, idx):
                 spk_in_window = utils.slice_array(
@@ -471,7 +465,7 @@ class PolynomialApproximation(MonteCarloApproximation):
                 X, i[1].astype(int), self.max_window
             )
             dts = spk_in_window[0] - i[0]
-            eval = self.eval_function(dts, self.history_window, self.n_basis_funcs)
+            eval = self.eval_function(dts)
 
             k_sum = k_sum.at[spk_in_window[1].astype(int)].add(eval)
 
@@ -551,6 +545,7 @@ class PolynomialApproximation(MonteCarloApproximation):
             X: Union[DESIGN_INPUT_TYPE, ArrayLike],
             params: Tuple[jnp.array, jnp.array],
             bin_size: Optional=0.001,
+            time_sec: Optional=None,
     ) -> jnp.ndarray:
         """Predict rates based on fit parameters."""
 
@@ -561,7 +556,7 @@ class PolynomialApproximation(MonteCarloApproximation):
                 X, t[1].astype(int), self.max_window
             )
             dts = spk_in_window[0] - t[0]
-            dts_eval = raised_cosine_log_eval(dts, self.history_window, self.n_basis_funcs)
+            dts_eval = self.eval_function(dts)
             l = jnp.zeros((N,J)).at[spk_in_window[1].astype(int)].set(dts_eval)
             return utils.quadratic(
                 jnp.dot(
@@ -573,12 +568,14 @@ class PolynomialApproximation(MonteCarloApproximation):
             )
         intensity_function_vmap = jax.vmap(lambda idx: intensity_function(X, idx), in_axes=(1,))
 
+        if time_sec is None:
+            time_sec = self.T
+
         weights, bias = params
         X = utils.adjust_indices_and_spike_times(X, self.history_window, self.max_window)
         N, J = weights.reshape(-1, self.n_basis_funcs).shape
 
-        bin_times = jnp.linspace(bin_size, self.T, int(self.T / bin_size)) - bin_size/2
-        # bin_times = jnp.linspace(0, self.T, int(self.T / bin_size))
+        bin_times = jnp.linspace(bin_size, time_sec, int(time_sec / bin_size)) - bin_size/2
         bin_idx = jnp.searchsorted(X[0], bin_times, "right")
         bin_array =  jnp.vstack((bin_times, bin_idx))
 
