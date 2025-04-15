@@ -191,8 +191,8 @@ class ContinuousMC(BaseRegressor):
         strong_convexity = None
         return compute_optimal_params, compute_smoothness, strong_convexity
 
-    @staticmethod
     def _initialize_intercept_matching_mean_rate(
+            self,
             inverse_link_function: Callable,
             y: jnp.ndarray,
     ) -> jnp.ndarray:

@@ -12,7 +12,6 @@ from nemos.observation_models import Observations
 from nemos.typing import DESIGN_INPUT_TYPE
 
 from . import utils
-from .basis import laguerre_int, laguerre_prod_int
 
 class MonteCarloApproximation(Observations):
 
@@ -278,9 +277,8 @@ class PolynomialApproximation(MonteCarloApproximation):
             n_batches_scan,
             history_window,
             eval_function,
-            int_function = laguerre_int,
-            prod_int_function = laguerre_prod_int,
-            window_size=None,
+            int_function,
+            prod_int_function,
             approx_interval=None,
             inverse_link_function=jnp.exp,
     ):
@@ -303,7 +301,6 @@ class PolynomialApproximation(MonteCarloApproximation):
         self.prod_int_function = prod_int_function
         self.int_function = int_function
         # model specific
-        self.window_size = window_size
         self.approx_interval = approx_interval
 
     def _initialize_data_params(
@@ -321,18 +318,18 @@ class PolynomialApproximation(MonteCarloApproximation):
             self.suff = self.suff_stats(X)
 
     def compute_m(self, spikes_n):
-        phi_int = self.int_function(-self.history_window, self.history_window, self.n_basis_funcs)
+        phi_int = self.int_function(-self.history_window)
         return (spikes_n[:, None] * phi_int).ravel()
 
-    def compute_M_block(self, tot_spikes, max_spikes, pair):
+    def compute_M_block(self, tot_spikes, post_indices, pair):
         def compute_Mn_half(pair):
             def valid_idx(M_scan, idx):
                 spk_in_window = utils.slice_array(
                     tot_spikes, idx[1].astype(int), self.max_window
                 )
                 dts = spk_in_window[0] - idx[0]
-                dts_valid = jnp.where(spk_in_window[1] == pair[0], dts, invalid_dts)
-                cross_prod_sum = self.prod_int_function(dts_valid, self.history_window, self.n_basis_funcs).sum(0)
+                dts_valid = jnp.where(spk_in_window[1] == pair[0], dts, -self.history_window - 1)
+                cross_prod_sum = self.prod_int_function(dts_valid).sum(0)
                 M_scan = M_scan + cross_prod_sum
                 return M_scan
 
@@ -349,10 +346,13 @@ class PolynomialApproximation(MonteCarloApproximation):
                 in_axes=1
             )
 
-            post_idx = jnp.nonzero(tot_spikes[1] == pair[1], size=max_spikes, fill_value=tot_spikes.shape[1] + 5)[0]
-            post_idx_array, padding = utils.reshape_for_vmap(jnp.vstack((tot_spikes[0, post_idx], post_idx)),
-                                                             self.n_batches_scan)
-            invalid_dts = jnp.tile(-self.history_window - 1, self.max_window)
+            post_idx_array, padding = utils.reshape_for_vmap(
+                jnp.vstack(
+                    (tot_spikes[0, post_indices[pair[1].astype(int)]],
+                     post_indices[pair[1].astype(int)])
+                ),
+                self.n_batches_scan
+            )
             out, _ = scan_vmap(post_idx_array)
             sub, _ = scan_vmap(padding[None, :])
 
@@ -386,21 +386,33 @@ class PolynomialApproximation(MonteCarloApproximation):
 
     def compute_M(
             self,
+            X,
             spikes_n,
-            tot_spikes,
             neuron_ids,
     ):
         self_pairs = jnp.array(list(zip(neuron_ids, neuron_ids)))
         cross_pairs = jnp.array(list(utils.jax_pairs(neuron_ids)))
 
         self_products = jnp.einsum("i,jk->ijk", spikes_n,
-                                   self.prod_int_function(jnp.array([0]), self.history_window, self.n_basis_funcs)[0])
+                                   self.prod_int_function(jnp.array([0]))[0])
 
-        M_block_pair = lambda p: self.compute_M_block(tot_spikes, int(spikes_n.max()), p)
+        post_indices = utils.precompute_spike_indices(X[1], neuron_ids, int(spikes_n.max()))
+        M_block_pair = lambda p: self.compute_M_block(X, post_indices, p)
 
-        M_self = jax.vmap(M_block_pair)(self_pairs)
+        def batched_scan(pairs, batch_size):
+            results = []
+            for i in range(0, pairs.shape[0], batch_size):
+                batch = pairs[i:i + batch_size]
+                processed = jax.vmap(M_block_pair)(batch)
+                results.append(processed)
+            return jnp.concatenate(results, axis=0)
+
+
+        # M_self = jax.vmap(M_block_pair)(self_pairs)
+        M_self = batched_scan(self_pairs, 10)
         M_self += self_products
-        M_cross = jax.vmap(M_block_pair)(cross_pairs) if len(cross_pairs) != 0 else None
+        # M_cross = jax.vmap(M_block_pair)(cross_pairs) if len(cross_pairs) != 0 else None
+        M_cross = batched_scan(cross_pairs, 100) if len(cross_pairs) != 0 else None
 
         M_full = self.construct_M(M_self, M_cross)
         return M_full
@@ -412,12 +424,12 @@ class PolynomialApproximation(MonteCarloApproximation):
         """
         precompute sufficient statics m, M for pac glm
         """
-        neuron_ids, spikes_n = jnp.unique(X[1, self.max_window:], return_counts=True)
+        neuron_ids, spikes_n = jnp.unique(X[1], return_counts=True)
 
         m = self.compute_m(spikes_n)
         M = self.compute_M(
-            spikes_n,
             X,
+            spikes_n,
             neuron_ids
         )
 

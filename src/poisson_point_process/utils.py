@@ -51,6 +51,26 @@ def reshape_for_vmap(spikes, n_batches_scan):
 
     return shifted_spikes_array, padding.transpose(1,0)
 
+def precompute_spike_indices(spike_ids, neuron_ids, max_spikes):
+    def one_neuron_indices(target_id):
+        return jnp.nonzero(spike_ids == target_id, size=max_spikes, fill_value=spike_ids.size + 5)[0]
+    #
+    # post_indices = []
+    # for target_id in neuron_ids:
+    #     post_indices.append(jnp.nonzero(spike_ids == target_id, size=max_spikes, fill_value=spike_ids.size + 5)[0])
+
+    batch_size = 10
+    post_indices = []
+
+    for i in range(0, len(neuron_ids), batch_size):
+        batch_ids = jnp.arange(i, min(i + batch_size, len(neuron_ids)))
+        batched = jax.vmap(one_neuron_indices)(batch_ids)
+        post_indices.append(batched)
+
+    return jnp.concatenate(post_indices, axis=0)
+
+    # return jnp.stack(post_indices)
+
 def compute_chebyshev(f, approx_interval, power=2, dx=0.01):
     """jax only implementation"""
     xx = jnp.arange(approx_interval[0] + dx / 2.0, approx_interval[1], dx)
