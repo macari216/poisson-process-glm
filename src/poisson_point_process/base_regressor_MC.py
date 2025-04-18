@@ -552,7 +552,8 @@ class BaseRegressor(Base, abc.ABC):
         self._check_input_n_timepoints(X, y)
 
         # error if all samples are invalid
-        validation.error_all_invalid(X, y)
+        # TODO: make this check work with dimension mismatch
+        # validation.error_all_invalid(X, y)
 
         # validate input and params consistency
         init_params = self._check_params(init_params)

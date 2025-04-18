@@ -14,7 +14,6 @@ from nemos.typing import DESIGN_INPUT_TYPE
 from . import utils
 
 class MonteCarloApproximation(Observations):
-
     def __init__(
             self,
             n_basis_funcs,
@@ -28,6 +27,8 @@ class MonteCarloApproximation(Observations):
         self.scale = 1.0
         self.T = None
         self.max_window = None
+        self.ll_function = None
+        self.intensity_function = None
 
         self.n_basis_funcs = n_basis_funcs
         self.n_batches_scan = n_batches_scan
@@ -35,6 +36,10 @@ class MonteCarloApproximation(Observations):
         self.eval_function = eval_function
         # model specific
         self.M = mc_n_samples
+
+    def _set_ll_function(self, population=False):
+        self.ll_function = self.compute_summed_ll_vec if population else self.compute_summed_ll
+        self.intensity_function = self.linear_non_linear_vec if population else self.linear_non_linear
 
     def _initialize_data_params(
             self,
@@ -50,7 +55,6 @@ class MonteCarloApproximation(Observations):
     def sum_basis_and_dot(self, weights, dts):
         """compilable linear-non-linear transform"""
         fx = self.eval_function(dts)
-        # return jnp.sum(fx * weights, axis=1)
         return jnp.sum(fx * weights)
 
     def linear_non_linear(self, dts, weights, bias):
@@ -70,9 +74,9 @@ class MonteCarloApproximation(Observations):
 
     def compute_summed_ll(
             self,
-            X,
-            y,
-            params,
+            X: DESIGN_INPUT_TYPE,
+            y: jnp.array,
+            params: Tuple[jnp.array, jnp.array],
             log=True
     ):
         optional_log = jnp.log if log else lambda x: x
@@ -91,15 +95,62 @@ class MonteCarloApproximation(Observations):
             dts = spk_in_window[0] - i[0]
 
             ll = optional_log(
-                self.linear_non_linear(dts, weights[spk_in_window[1].astype(int)], bias)
+                self.intensity_function(dts, weights[spk_in_window[1].astype(int)], bias)
             )
             lam_s += jnp.sum(ll)
             return lam_s, None
 
-        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.array(0), idxs), in_axes=1)
+        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.array(0), idxs), in_axes=0)
         out, _ = scan_vmap(shifted_spikes_array)
         sub, _ = scan_vmap(padding[None,:])
         return jnp.sum(out) - jnp.sum(sub)
+
+    @partial(jax.jit, static_argnames=("self",))
+    def sum_basis_and_dot_vec(self, weights, dts):
+        """compilable linear-non-linear transform"""
+        fx = self.eval_function(dts)
+        return jnp.sum(fx[:,:,None] * weights, axis=(0,1))
+
+    def linear_non_linear_vec(self, dts, weights, bias):
+        ll = self.inverse_link_function(self.sum_basis_and_dot_vec(weights, dts) + bias)
+        return ll
+
+    def compute_summed_ll_vec(
+            self,
+            X: DESIGN_INPUT_TYPE,
+            y: jnp.array,
+            params: Tuple[jnp.array, jnp.array],
+            log=True
+    ):
+        optional_log = jnp.log if log else lambda x: x
+        weights, bias = params
+        n_neurons = weights.shape[1]
+        weights = weights.reshape(-1, self.n_basis_funcs, n_neurons)
+        n_neurons = weights.shape[2]
+
+        # body of the scan function
+        def scan_fn(lam_s, i):
+            spk_in_window = utils.slice_array(
+                X, i[-1].astype(int), self.max_window
+            )
+            dts = spk_in_window[0] - i[0]
+            ll = optional_log(
+                self.linear_non_linear_vec(dts, weights[spk_in_window[1].astype(int)], bias)
+            )
+            lam_s = jax.lax.cond(
+                log,
+                lambda lam_s: lam_s.at[i[1].astype(int)].add(ll[i[1].astype(int)]),
+                lambda lam_s: lam_s + ll,
+                lam_s
+            )
+            return lam_s, None
+
+        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.zeros(n_neurons), idxs), in_axes=0)
+        shifted_spikes_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
+        out, _ = scan_vmap(shifted_spikes_array)
+        sub, _ = scan_vmap(padding[None, :])
+        ll_term = jnp.sum(out, axis=0) - jnp.sum(sub, axis=0)
+        return ll_term.sum()
 
     def _negative_log_likelihood(
             self,
@@ -108,7 +159,9 @@ class MonteCarloApproximation(Observations):
             params: Optional=None,
             random_key: Optional=None,
     ):
-        log_lam_y = self.compute_summed_ll(
+
+
+        log_lam_y = self.ll_function(
             X,
             y,
             params,
@@ -116,7 +169,7 @@ class MonteCarloApproximation(Observations):
         )
 
         mc_samples = self.draw_mc_sample(X, self.M, random_key)
-        mc_estimate = self.compute_summed_ll(
+        mc_estimate = self.ll_function(
             X,
             mc_samples,
             params,
@@ -143,14 +196,18 @@ class MonteCarloApproximation(Observations):
             )
             dts = spk_in_window[0] - t[0]
 
-            return self.linear_non_linear(dts, weights[spk_in_window[1].astype(int)], bias)
+            return self.intensity_function(dts, weights[spk_in_window[1].astype(int)], bias)
         intensity_function_vmap = jax.vmap(lambda idx: intensity_function(X, idx), in_axes=(1,))
 
         if time_sec is None:
             time_sec = self.T
 
         weights, bias = params
-        weights = weights.reshape(-1, self.n_basis_funcs)
+        if (weights.shape) == 1:
+            weights = weights.reshape(-1, self.n_basis_funcs)
+        else:
+            n_neurons = weights.shape[1]
+            weights = weights.reshape(-1, self.n_basis_funcs, n_neurons)
         X = utils.adjust_indices_and_spike_times(X, self.history_window, self.max_window)
 
         bin_times = jnp.linspace(bin_size, time_sec, int(time_sec / bin_size)) - bin_size/2
@@ -343,7 +400,7 @@ class PolynomialApproximation(MonteCarloApproximation):
 
             scan_vmap = jax.vmap(
                 lambda idxs: jax.lax.scan(scan_fn, jnp.zeros((self.n_basis_funcs, self.n_basis_funcs)), idxs),
-                in_axes=1
+                in_axes=0
             )
 
             post_idx_array, padding = utils.reshape_for_vmap(

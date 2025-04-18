@@ -259,6 +259,9 @@ class ContinuousMC(BaseRegressor):
         if self.T is None:
             self.T = jnp.ceil(X[0, -1])
 
+    def _set_obs_model(self, population=False):
+        self.observation_model._set_ll_function(population)
+
     def initialize_state(
             self,
             X: DESIGN_INPUT_TYPE,
@@ -269,6 +272,7 @@ class ContinuousMC(BaseRegressor):
         # set data dependent parameters
         self._initialize_data_params(X, y)
         self.observation_model._initialize_data_params(self.T,self.max_window)
+        self._set_obs_model()
 
         #add max window padding to X and y
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
@@ -308,6 +312,7 @@ class ContinuousMC(BaseRegressor):
         # set data dependent parameters
         self._initialize_data_params(X, y)
         self.observation_model._initialize_data_params(self.T, self.max_window)
+        self._set_obs_model()
 
         #add max window padding to X and y
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
@@ -349,7 +354,8 @@ class ContinuousMC(BaseRegressor):
         """Run a single update step of the jaxopt solver."""
         # set data dependent parameters
         self._initialize_data_params(X, y)
-        self.observation_model._initialize_data_params(self.T, self.max_window)
+        # self.observation_model._initialize_data_params(self.T, self.max_window)
+        # self._set_obs_model()
 
         #add max window padding to X and y
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
@@ -396,6 +402,150 @@ class ContinuousMC(BaseRegressor):
     ):
         """Simulate neural activity in response to a feed-forward input and recurrent activity."""
         pass
+
+class PopulationContinuousMC(ContinuousMC):
+    def __init__(
+        self,
+        observation_model: obs.MonteCarloApproximation,
+        random_key: ArrayLike=jax.random.PRNGKey(0),
+        regularizer: Union[str, Regularizer] = "UnRegularized",
+        regularizer_strength: Optional[float] = None,
+        solver_name: str = None,
+        solver_kwargs: dict = None,
+    ):
+        super().__init__(
+            observation_model=observation_model,
+            regularizer=regularizer,
+            regularizer_strength=regularizer_strength,
+            solver_name=solver_name,
+            solver_kwargs=solver_kwargs,
+        )
+
+        # initialize to None fit output
+        self.intercept_ = None
+        self.coef_ = None
+        self.solver_state_ = None
+        self.scale_ = None
+        self.dof_resid_ = None
+        self.T = None
+        self.max_window = None
+
+        self.observation_model = observation_model
+        self.random_key = random_key
+
+    @staticmethod
+    def _check_params(
+            params: Tuple[Union[DESIGN_INPUT_TYPE, ArrayLike], ArrayLike],
+            data_type: Optional[jnp.dtype] = None,
+    ) -> Tuple[DESIGN_INPUT_TYPE, jnp.ndarray]:
+        """
+        Validate the dimensions and consistency of parameters.
+
+        This function checks the consistency of shapes and dimensions for model
+        parameters.
+        It ensures that the parameters and data are compatible for the model.
+
+        """
+        # check params has length two
+        validation.check_length(params, 2, "Params must have length two.")
+        # convert to jax array (specify type if needed)
+        params = validation.convert_tree_leaves_to_jax_array(
+            params,
+            "Initial parameters must be array-like objects (or pytrees of array-like objects) "
+            "with numeric data-type!",
+            data_type,
+        )
+
+        # check the dimensionality of coeff
+        validation.check_tree_leaves_dimensionality(
+            params[0],
+            expected_dim=2,
+            err_message="params[0] must be an array or nemos.pytree.FeaturePytree "
+            "with array leafs of shape (n_features, n_neurons).",
+        )
+        # check the dimensionality of intercept
+        validation.check_tree_leaves_dimensionality(
+            params[1],
+            expected_dim=1,
+            err_message="params[1] must be of shape (n_neurons,) but "
+            f"params[1] has {params[1].ndim} dimensions!",
+        )
+        if tree_utils.pytree_map_and_reduce(
+            lambda x: x.shape[1] != params[1].shape[0], all, params[0]
+        ):
+            raise ValueError(
+                "Inconsistent number of neurons. "
+                f"The intercept assumes {params[1].shape[0]} neurons, "
+                f"the coefficients {params[0].shape[1]} instead!"
+            )
+        return params
+
+    @staticmethod
+    def _check_input_dimensionality(
+            X: Optional[DESIGN_INPUT_TYPE] = None,
+            y: Optional[jnp.ndarray] = None,
+    ):
+        if y is not None:
+            validation.check_tree_leaves_dimensionality(
+                y,
+                expected_dim=2,
+                err_message="y must be two-dimensional, with shape (3, n_target_spikes).",
+            )
+        if y.shape[0] != 3:
+            raise ValueError(
+                "y must have shape 3 at dimension 0 corresponding to postsynaptic spike times, neuron IDs and indices"
+            )
+        if X is not None:
+            validation.check_tree_leaves_dimensionality(
+                X,
+                expected_dim=2,
+                err_message="X must be two-dimensional, with shape "
+                "(2, n_spikes) or pytree of the same shape.",
+            )
+        if X.shape[0] != 2:
+            raise ValueError(
+                "X must have shape 2 at dimension 0 corresponding to spike times and neurons ids"
+            )
+
+    def _initialize_intercept_matching_mean_rate(
+            self,
+            inverse_link_function: Callable,
+            y: jnp.ndarray,
+    ) -> jnp.ndarray:
+
+        INVERSE_FUNCS = {
+            jnp.exp: jnp.log,
+            jax.nn.softplus: lambda x: jnp.log(jnp.exp(x) - 1.0),
+        }
+
+        analytical_inv = INVERSE_FUNCS.get(inverse_link_function, None)
+        _, spikes_per_neuron = jnp.unique(y[1], return_counts=True)
+
+        return jnp.atleast_1d(analytical_inv(spikes_per_neuron / int(jnp.ceil(y[0, -1]))))
+
+    def _initialize_parameters(
+            self,
+            X: DESIGN_INPUT_TYPE,
+            y: jnp.ndarray
+    )-> Tuple[Union[dict, jnp.ndarray], jnp.ndarray]:
+        #set initial intercept as the inverse of firing rate
+        initial_intercept = self._initialize_intercept_matching_mean_rate(
+            self.observation_model.inverse_link_function, y
+        )
+        # get coef dimensions
+        n_features = len(jnp.unique(X[1])) * self.observation_model.n_basis_funcs
+        n_neurons = len(jnp.unique(y[1]))
+
+        #initialize parameters
+        init_params = (
+            jnp.zeros((n_features, n_neurons)),
+            initial_intercept,
+        )
+        return init_params
+
+    def _set_obs_model(self, population=True):
+        self.observation_model._set_ll_function(population)
+
 
 class ContinuousPA(ContinuousMC):
     def __init__(

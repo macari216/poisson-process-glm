@@ -31,12 +31,10 @@ def adjust_indices_and_spike_times(
 ):
     shift = jnp.vstack((jnp.full(max_window, -history_window - 1), jnp.full(max_window, 0)))
     shifted_X = jnp.hstack((shift, X))
-
     if y is not None:
-        shifted_idx = y[1].astype(int) + max_window
-        shifted_y =  jnp.vstack((y[0], shifted_idx))
+        shifted_idx = y[-1].astype(int) + max_window
+        shifted_y = jnp.vstack((y[:-1], shifted_idx))
         return shifted_X, shifted_y
-
     else:
         return shifted_X
 
