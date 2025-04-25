@@ -3,7 +3,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 from jax.scipy.special import gamma, gammainc, factorial
-from scipy.special import laguerre
+from scipy.special import laguerre, genlaguerre
 
 import numpy as np
 from sklearn.decomposition import PCA
@@ -130,9 +130,9 @@ def gp_basis(ws, n_fun, gamma=50, seed=0, rh=1, len_sc=0.12, a=50., b=0.001, w=0
     alpha = a*((x-delay)**2)*np.exp(-(x-delay) / w) + b
     alpha[x<delay] = b
     synapse_K = K_log*alpha[None,:]
-    samp_GP = np.array(np.random.multivariate_normal(np.zeros(ws), synapse_K,10000)).T
+    samp_GP = np.array(np.random.multivariate_normal(np.zeros(ws), synapse_K,10000))
     pca = PCA(n_components=n_fun)
-    pca.fit(samp_GP.T)
+    pca.fit(samp_GP)
     dx = 1 / (ws - 1)  # Grid spacing
     norm_factor = np.sqrt(dx)
     basis_kernel = pca.components_.T / norm_factor
@@ -156,6 +156,23 @@ def LaguerreEval(ws, n_basis_funcs, c=1.0, max_x=30.):
     eval_func = lambda dts: basis_funcs(dts, ws, P, c, max_x)
     return eval_func
 
+def GenLaguerreEval(ws, n_basis_funcs, c=2.0, alpha=1.0, max_x=30.):
+    P = np.zeros((n_basis_funcs, n_basis_funcs))
+    for n in range(n_basis_funcs):
+        P[n, :(n+1)] = genlaguerre(n, alpha).coef[::-1]
+    P = jnp.array(P)
+
+    def bf_eval(x, ws, p, c, alpha, max_x):
+        x = -x / ws
+        x = jnp.where(jnp.abs(x) > 1, 1, x)
+        x *= max_x
+        out = jnp.exp(-c * x/2) * jnp.power(c * x, alpha) * jnp.polyval(p[::-1], c * x)
+        return out.T
+    basis_funcs = jax.vmap(bf_eval, in_axes=(None, None, 0, None, None, None), out_axes=1)
+
+    eval_func = lambda dts: basis_funcs(dts, ws, P, c, alpha, max_x)
+    return eval_func
+
 @partial(jax.jit, static_argnums=(1, 2, 3, 4))
 def laguerre_int(x, ws, n_basis_funcs, c=1.0, max_x=30.):
     """Compute the integral I_n(x) = ∫_0^x L_n(t) * exp(-ct) dt using incomplete gamma function."""
@@ -170,10 +187,10 @@ def laguerre_int(x, ws, n_basis_funcs, c=1.0, max_x=30.):
     comb_nk = combs[n, k]
     coeffs = ((-1) ** (k)) / (factorial(k)) * comb_nk
     powers = k + 1
-    terms = lambda x: gammainc(powers, c/2 * x) * gamma(powers) / ((c/2) ** powers)
+    terms = lambda x: gammainc(powers, c * x/2) * gamma(powers) * (2 ** powers/c)
 
-    integrals = coeffs * (terms(x) - terms(0))
-    return integrals.sum(1) / max_x * ws
+    integrals = coeffs * terms(x)
+    return (integrals.sum(1) / max_x) * ws
 
 def precompute_laguerre_coeffs(N, c=1.0):
     idx = jnp.arange(N)
