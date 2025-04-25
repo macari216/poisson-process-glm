@@ -28,6 +28,7 @@ class MonteCarloApproximation(Observations):
         self.T = None
         self.max_window = None
         self.ll_function = None
+        self.ll_function_MC = None
         self.intensity_function = None
 
         self.n_basis_funcs = n_basis_funcs
@@ -39,6 +40,7 @@ class MonteCarloApproximation(Observations):
 
     def _set_ll_function(self, population=False):
         self.ll_function = self.compute_summed_ll_vec if population else self.compute_summed_ll
+        self.ll_function_MC = self.compute_summed_ll_vec_MC if population else self.compute_summed_ll
         self.intensity_function = self.linear_non_linear_vec if population else self.linear_non_linear
 
     def _initialize_data_params(
@@ -97,10 +99,10 @@ class MonteCarloApproximation(Observations):
             ll = optional_log(
                 self.intensity_function(dts, weights[spk_in_window[1].astype(int)], bias)
             )
-            lam_s += jnp.sum(ll)
+            lam_s += ll.sum()
             return lam_s, None
 
-        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.array(0), idxs), in_axes=0)
+        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.array(0), idxs), in_axes=1)
         out, _ = scan_vmap(shifted_spikes_array)
         sub, _ = scan_vmap(padding[None,:])
         return jnp.sum(out) - jnp.sum(sub)
@@ -114,6 +116,39 @@ class MonteCarloApproximation(Observations):
     def linear_non_linear_vec(self, dts, weights, bias):
         ll = self.inverse_link_function(self.sum_basis_and_dot_vec(weights, dts) + bias)
         return ll
+
+    def compute_summed_ll_vec_MC(
+            self,
+            X: DESIGN_INPUT_TYPE,
+            y: jnp.array,
+            params: Tuple[jnp.array, jnp.array],
+            log=True
+    ):
+        optional_log = jnp.log if log else lambda x: x
+        weights, bias = params
+        n_neurons = weights.shape[1]
+        weights = weights.reshape(-1, self.n_basis_funcs, n_neurons).squeeze()
+        n_neurons = weights.shape[2]
+
+        # body of the scan function
+        def scan_fn(lam_s, i):
+            spk_in_window = utils.slice_array(
+                X, i[-1].astype(int), self.max_window
+            )
+            dts = spk_in_window[0] - i[0]
+            ll = optional_log(
+                self.linear_non_linear_vec(dts, weights[spk_in_window[1].astype(int)], bias)
+            )
+
+            lam_s += ll
+            return lam_s, None
+
+        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.zeros(n_neurons), idxs), in_axes=1)
+        shifted_spikes_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
+        out, _ = scan_vmap(shifted_spikes_array)
+        sub, _ = scan_vmap(padding[None, :])
+        ll_term = jnp.sum(out, axis=0) - jnp.sum(sub, axis=0)
+        return ll_term.sum()
 
     def compute_summed_ll_vec(
             self,
@@ -135,21 +170,17 @@ class MonteCarloApproximation(Observations):
             )
             dts = spk_in_window[0] - i[0]
             ll = optional_log(
-                self.linear_non_linear_vec(dts, weights[spk_in_window[1].astype(int)], bias)
+                self.linear_non_linear(dts, weights[spk_in_window[1].astype(int),:,i[1].astype(int)], bias[i[1].astype(int)])
             )
-            lam_s = jax.lax.cond(
-                log,
-                lambda lam_s: lam_s.at[i[1].astype(int)].add(ll[i[1].astype(int)]),
-                lambda lam_s: lam_s + ll,
-                lam_s
-            )
+            lam_s = lam_s.at[i[1].astype(int)].add(ll)
+
             return lam_s, None
 
-        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.zeros(n_neurons), idxs), in_axes=0)
-        shifted_spikes_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
+        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.zeros(n_neurons), idxs), in_axes=1)
+        shifted_spikes_array, _ = utils.reshape_for_vmap(y, self.n_batches_scan)
         out, _ = scan_vmap(shifted_spikes_array)
-        sub, _ = scan_vmap(padding[None, :])
-        ll_term = jnp.sum(out, axis=0) - jnp.sum(sub, axis=0)
+        # sub, _ = scan_vmap(padding[None, :])
+        ll_term = jnp.sum(out, axis=0) #- jnp.sum(sub, axis=0)
         return ll_term.sum()
 
     def _negative_log_likelihood(
@@ -169,7 +200,7 @@ class MonteCarloApproximation(Observations):
         )
 
         mc_samples = self.draw_mc_sample(X, self.M, random_key)
-        mc_estimate = self.ll_function(
+        mc_estimate = self.ll_function_MC(
             X,
             mc_samples,
             params,
@@ -378,67 +409,67 @@ class PolynomialApproximation(MonteCarloApproximation):
         phi_int = self.int_function(-self.history_window)
         return (spikes_n[:, None] * phi_int).ravel()
 
-    def compute_M_block(self, tot_spikes, post_indices, pair):
-        def compute_Mn_half(pair):
-            def valid_idx(M_scan, idx):
-                spk_in_window = utils.slice_array(
-                    tot_spikes, idx[1].astype(int), self.max_window
-                )
-                dts = spk_in_window[0] - idx[0]
-                dts_valid = jnp.where(spk_in_window[1] == pair[0], dts, -self.history_window - 1)
-                cross_prod_sum = self.prod_int_function(dts_valid).sum(0)
-                M_scan = M_scan + cross_prod_sum
-                return M_scan
+    # a single scan
+    def scatter_block_add(self,
+                          operand: jnp.ndarray,
+                          updates: jnp.ndarray,
+                          row_idx: jnp.ndarray,
+                          col_idx: jnp.ndarray) -> jnp.ndarray:
+        """
+        Scatters (J, J) blocks from `updates` into a 2D `operand` matrix at specified row/col offsets,
+        where each row/col index refers to a J×J block (i.e. gets multiplied by J).
+        Parameters:
+            operand: (tot_dim, tot_dim) target matrix
+            updates: (S, J, J) block updates
+            row_idx: (S,) row block indices
+            col_idx: (S,) col block indices
+        Returns:
+            Updated operand with block additions applied
+        """
+        S, J, _ = updates.shape
+        # Scale the base row/col index by block size
+        row_base = (row_idx * J)[:, None, None]  # (S, 1, 1)
+        col_base = (col_idx * J)[:, None, None]  # (S, 1, 1)
+        # Local block offsets (0 to J-1)
+        row_offsets = jnp.arange(J)[None, :, None]  # (1, J, 1)
+        col_offsets = jnp.arange(J)[None, None, :]  # (1, 1, J)
+        # Final indices: (S, J, J)
+        row_indices = jnp.broadcast_to(row_base + row_offsets, (S, J, J))
+        col_indices = jnp.broadcast_to(col_base + col_offsets, (S, J, J))
+        # Stack to shape (S*J*J, 2)
+        scatter_indices = jnp.stack([row_indices, col_indices], axis=-1).reshape(-1, 2)
+        scatter_updates = updates.reshape(-1)
+        dnums = jax.lax.ScatterDimensionNumbers(
+            update_window_dims=(),
+            inserted_window_dims=(0, 1),
+            scatter_dims_to_operand_dims=(0, 1)
+        )
+        return jax.lax.scatter_add(operand, scatter_indices, scatter_updates, dnums)
 
-            def invalid_idx(M_scan, idx):
-                M_scan += jnp.zeros((self.n_basis_funcs, self.n_basis_funcs))
-                return M_scan
-
-            def scan_fn(M_scan, idx):
-                M_scan = jax.lax.cond(idx[1].astype(int) > tot_spikes.shape[1], invalid_idx, valid_idx, M_scan, idx)
-                return M_scan, None
-
-            scan_vmap = jax.vmap(
-                lambda idxs: jax.lax.scan(scan_fn, jnp.zeros((self.n_basis_funcs, self.n_basis_funcs)), idxs),
-                in_axes=0
+    def compute_M_full(self, tot_spikes):
+        """
+        compute the full (NJ,NJ) interaction matrix by running one pass over the entire dataset
+        and performing lax.scatter_add() updates
+        """
+        n_features = self.n_basis_funcs * len(jnp.unique(tot_spikes[1, self.max_window:]))
+        def scan_fn(M_scan, idx):
+            spk_in_window = utils.slice_array(
+                tot_spikes, idx[-1].astype(int), self.max_window
             )
-
-            post_idx_array, padding = utils.reshape_for_vmap(
-                jnp.vstack(
-                    (tot_spikes[0, post_indices[pair[1].astype(int)]],
-                     post_indices[pair[1].astype(int)])
-                ),
-                self.n_batches_scan
-            )
-            out, _ = scan_vmap(post_idx_array)
-            sub, _ = scan_vmap(padding[None, :])
-
-            return jnp.sum(out, 0) - jnp.sum(sub, 0)
-
-        pair_double = jnp.stack((pair, pair[::-1]))
-        pair_M = jax.vmap(compute_Mn_half)(pair_double)
-
-        return pair_M[0] + pair_M[1].T
-
-    def construct_M(self, M_self, M_cross):
-        N, J = M_self.shape[0], M_self.shape[1]
-        M_empty = jnp.zeros((N * J, N * J), dtype=(M_self.dtype))
-        diag_starts = jnp.arange(N) * J
-
-        @jax.jit
-        def insert_block(matrix, idx, block):
-            return jax.lax.dynamic_update_slice(matrix, block, idx)
-
-        insert_block_vmap = jax.vmap(lambda idxs, blocks: insert_block(M_empty, idxs, blocks), in_axes=(0, 0))
-        M_full = insert_block_vmap((diag_starts, diag_starts), M_self).sum(0)
-
-        if M_cross is not None:
-            rows = jnp.arange((N * (N - 1)) // 2) // (N - 1)
-            cols = jnp.arange((N * (N - 1)) // 2) % (N - 1) + 1 + rows
-            i_starts, j_starts = rows * J, cols * J
-            M_full += insert_block_vmap((i_starts, j_starts), M_cross).sum(0)
-            M_full += insert_block_vmap((j_starts, i_starts), jnp.transpose(M_cross, (0, 2, 1))).sum(0)
-
+            dts = spk_in_window[0] - idx[0]
+            cross_prod_sums = self.prod_int_function(dts)
+            # M_scan = M_scan.at[spk_in_window[2].astype(int)*n_basis_funcs, idx[2].astype(int)*n_basis_funcs].add(cross_prod_sums)
+            M_scan = self.scatter_block_add(M_scan, cross_prod_sums, spk_in_window[1].astype(int), jnp.tile(idx[1].astype(int), self.max_window))
+            M_scan = self.scatter_block_add(M_scan, cross_prod_sums.transpose(0,2,1), jnp.tile(idx[1].astype(int), self.max_window), spk_in_window[1].astype(int))
+            return M_scan, None
+        scan_vmap = jax.vmap(
+            lambda idxs: jax.lax.scan(scan_fn, jnp.zeros((n_features, n_features)), idxs),
+            in_axes=1
+        )
+        post_idx_array, padding = utils.reshape_for_vmap(tot_spikes[:, self.max_window:], self.n_batches_scan)
+        out, _ = scan_vmap(post_idx_array)
+        sub, _ = scan_vmap(padding[None, :])
+        M_full = jnp.sum(out, 0) - jnp.sum(sub, 0)
         return M_full
 
     def compute_M(
@@ -447,31 +478,21 @@ class PolynomialApproximation(MonteCarloApproximation):
             spikes_n,
             neuron_ids,
     ):
-        self_pairs = jnp.array(list(zip(neuron_ids, neuron_ids)))
-        cross_pairs = jnp.array(list(utils.jax_pairs(neuron_ids)))
 
         self_products = jnp.einsum("i,jk->ijk", spikes_n,
                                    self.prod_int_function(jnp.array([0]))[0])
 
-        post_indices = utils.precompute_spike_indices(X[1], neuron_ids, int(spikes_n.max()))
-        M_block_pair = lambda p: self.compute_M_block(X, post_indices, p)
+        X = jnp.vstack((X, jnp.arange(X.shape[1])))
+        M_full = self.compute_M_full(X)
 
-        def batched_scan(pairs, batch_size):
-            results = []
-            for i in range(0, pairs.shape[0], batch_size):
-                batch = pairs[i:i + batch_size]
-                processed = jax.vmap(M_block_pair)(batch)
-                results.append(processed)
-            return jnp.concatenate(results, axis=0)
+        def insert_block(matrix, idx, block):
+            return jax.lax.dynamic_update_slice(matrix, block, idx)
 
+        diag_starts = (neuron_ids * self.n_basis_funcs).astype(int)
+        diag = jax.vmap(insert_block, in_axes=(None, 0, 0))(jnp.zeros_like(M_full), (diag_starts, diag_starts),
+                                                            self_products).sum(0)
+        M_full += diag
 
-        # M_self = jax.vmap(M_block_pair)(self_pairs)
-        M_self = batched_scan(self_pairs, 10)
-        M_self += self_products
-        # M_cross = jax.vmap(M_block_pair)(cross_pairs) if len(cross_pairs) != 0 else None
-        M_cross = batched_scan(cross_pairs, 100) if len(cross_pairs) != 0 else None
-
-        M_full = self.construct_M(M_self, M_cross)
         return M_full
 
     def suff_stats(
