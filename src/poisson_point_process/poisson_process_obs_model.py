@@ -18,6 +18,8 @@ class MonteCarloApproximation(Observations):
             n_batches_scan,
             history_window,
             eval_function,
+            control_var=False,
+            int_function=None,
             mc_n_samples=None,
             inverse_link_function=jnp.exp,
     ):
@@ -27,9 +29,8 @@ class MonteCarloApproximation(Observations):
         self.T = None
         self.recording_time = None
         self.max_window = None
-        self.ll_function = None
         self.ll_function_MC = None
-        self.intensity_function = None
+        self.Cj = None
 
         self.n_basis_funcs = n_basis_funcs
         self.n_batches_scan = n_batches_scan
@@ -37,33 +38,30 @@ class MonteCarloApproximation(Observations):
         self.eval_function = eval_function
         # model specific
         self.M = mc_n_samples
+        self.int_function = int_function
+        self.control_var = control_var
 
-    def _set_ll_function(self, population=False):
-        self.ll_function = self.compute_summed_ll_vec if population else self.compute_summed_ll
-        self.ll_function_MC = self.compute_summed_ll_vec_MC if population else self.compute_summed_ll
-        self.intensity_function = self.linear_non_linear_vec if population else self.linear_non_linear
+    def _set_ll_function(self):
+        self.ll_function_MC = self.compute_control_variate_MC_est if self.control_var else self.compute_MC_est
+
+    def compute_Cj(self, X):
+        _, spikes_n = jnp.unique(X[1], return_counts=True)
+        phi_int = self.int_function(-self.history_window)
+        return (spikes_n[:, None] * phi_int).ravel()
 
     def _initialize_data_params(
             self,
             recording_time,
             max_window: int,
+            X: Optional=None,
     ):
         if self.recording_time is None:
             self.recording_time = recording_time
             self.T = self.recording_time.tot_length()
         if self.max_window is None:
             self.max_window = max_window
-
-    @partial(jax.jit, static_argnames=("self",))
-    def sum_basis_and_dot(self, weights, dts):
-        """compilable linear-non-linear transform"""
-        fx = self.eval_function(dts)
-        return jnp.sum(fx * weights)
-
-    def linear_non_linear(self, dts, weights, bias):
-        """compute estmiated firing rates"""
-        ll = self.inverse_link_function(self.sum_basis_and_dot(weights, dts) + bias)
-        return ll
+        if (self.Cj is None) and self.control_var:
+            self.Cj = self.compute_Cj(X)
 
     def draw_mc_sample(self, X, M, random_key):
         """draw sample for a Monte-Carlo estimate of /int_0^T(lambda(t))dt"""
@@ -76,6 +74,78 @@ class MonteCarloApproximation(Observations):
         mc_spikes = jnp.vstack((tau_m, tau_m_idx))
 
         return mc_spikes
+
+    @partial(jax.jit, static_argnames=("self",))
+    def compute_lam_tilde(self, dts, weights, bias):
+        fx = self.eval_function(dts)
+        return jnp.sum(fx[:, :, None] * weights, axis=(0, 1)) + bias
+
+    def compute_control_variate_MC_est(
+            self,
+            X: DESIGN_INPUT_TYPE,
+            y: jnp.array,
+            params: Tuple[jnp.array, jnp.array],
+    ):
+        weights, bias = params
+        weights = utils.reshape_w(weights, self.n_basis_funcs)
+        n_target = weights.shape[-1]
+
+        def scan_fn(carry, i):
+            lam_s, lam_tilde_s = carry
+            spk_in_window = utils.slice_array(
+                X, i[-1].astype(int), self.max_window
+            )
+            dts = spk_in_window[0] - i[0]
+            lam_tilde = self.compute_lam_tilde(dts, weights[spk_in_window[1].astype(int)], bias)
+            lam_tilde_s += lam_tilde
+            lam_s += self.inverse_link_function(lam_tilde)
+            return (lam_s, lam_tilde_s), lam_tilde
+
+        scan_vmap = jax.vmap(
+            lambda idxs: jax.lax.scan(scan_fn, (jnp.zeros(n_target), jnp.zeros(n_target)), idxs),
+            in_axes=1
+        )
+
+        shifted_spikes_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
+        out, lam_tilde_v = scan_vmap(shifted_spikes_array)
+        sub, _ = scan_vmap(padding[None, :])
+        lam_tilde_v = jnp.concatenate(lam_tilde_v, axis=0)
+        lam_v = self.inverse_link_function(lam_tilde_v)
+        I_hat = (self.T / self.M) * (jnp.sum(out[0], axis=0) - jnp.sum(sub[0], axis=0))
+        U_hat = (self.T / self.M) * (jnp.sum(out[1], axis=0) - jnp.sum(sub[1], axis=0))
+        U = jnp.dot(self.Cj, weights.reshape(-1, n_target))
+        beta_min = (-1 *
+                    jnp.sum((lam_v - jnp.mean(lam_v, axis=0)) * (lam_tilde_v - jnp.mean(lam_tilde_v, axis=0)), axis=0) /
+                    jnp.clip(jnp.sum((lam_v - jnp.mean(lam_v, axis=0)) ** 2, axis=0), min=jnp.finfo(lam_v.dtype).eps)
+                    )
+        # jax.debug.print("beta {}", beta_min)
+        return jnp.sum(I_hat + beta_min * (U_hat - U))
+
+    def compute_MC_est(
+            self,
+            X: DESIGN_INPUT_TYPE,
+            y: jnp.array,
+            params: Tuple[jnp.array, jnp.array],
+    ):
+        weights, bias = params
+        weights = utils.reshape_w(weights, self.n_basis_funcs)
+        n_target = weights.shape[-1]
+
+        def scan_fn(lam_s, i):
+            spk_in_window = utils.slice_array(
+                X, i[-1].astype(int), self.max_window
+            )
+            dts = spk_in_window[0] - i[0]
+            lam_tilde = self.compute_lam_tilde(dts, weights[spk_in_window[1].astype(int)], bias)
+            lam_s += self.inverse_link_function(lam_tilde)
+            return lam_s, None
+
+        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.zeros(n_target), idxs), in_axes=1)
+
+        shifted_spikes_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
+        out, _ = scan_vmap(shifted_spikes_array)
+        sub, _ = scan_vmap(padding[None, :])
+        return (self.T / self.M) * (jnp.sum(out) - jnp.sum(sub))
 
     def compute_summed_ll(
             self,
@@ -95,7 +165,7 @@ class MonteCarloApproximation(Observations):
 
         Parameters:
             X: (2, S) the spike time data
-            y: (2, S) postsynaptic spike times and insertion indices
+            y: (3, S) postsynaptic spike times, spike IDs, and insertion indices
             params: current model parameters
             log: (bool) whether or not to apply log to computed lambda
         Returns:
@@ -104,52 +174,8 @@ class MonteCarloApproximation(Observations):
         optional_log = jnp.log if log else lambda x: x
 
         weights, bias = params
-        weights = weights.reshape(-1, self.n_basis_funcs)
-
-        shifted_spikes_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
-
-        # body of the scan function
-        def scan_fn(lam_s, i):
-            spk_in_window = utils.slice_array(
-                X, i[1].astype(int), self.max_window
-            )
-
-            dts = spk_in_window[0] - i[0]
-
-            ll = optional_log(
-                self.intensity_function(dts, weights[spk_in_window[1].astype(int)], bias)
-            )
-            lam_s += ll.sum()
-            return lam_s, None
-
-        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.array(0), idxs), in_axes=1)
-        out, _ = scan_vmap(shifted_spikes_array)
-        sub, _ = scan_vmap(padding[None,:])
-        return jnp.sum(out) - jnp.sum(sub)
-
-    @partial(jax.jit, static_argnames=("self",))
-    def sum_basis_and_dot_vec(self, weights, dts):
-        """compilable linear-non-linear transform (population)"""
-        fx = self.eval_function(dts)
-        return jnp.sum(fx[:,:,None] * weights, axis=(0,1))
-
-    def linear_non_linear_vec(self, dts, weights, bias):
-        """compute estmiated firing rates (population)"""
-        ll = self.inverse_link_function(self.sum_basis_and_dot_vec(weights, dts) + bias)
-        return ll
-
-    def compute_summed_ll_vec_MC(
-            self,
-            X: DESIGN_INPUT_TYPE,
-            y: jnp.array,
-            params: Tuple[jnp.array, jnp.array],
-            log=True
-    ):
-        optional_log = jnp.log if log else lambda x: x
-        weights, bias = params
-        n_neurons = weights.shape[1]
-        weights = weights.reshape(-1, self.n_basis_funcs, n_neurons).squeeze()
-        n_neurons = weights.shape[2]
+        weights = utils.reshape_w(weights, self.n_basis_funcs)
+        n_target = weights.shape[-1]
 
         # body of the scan function
         def scan_fn(lam_s, i):
@@ -157,59 +183,24 @@ class MonteCarloApproximation(Observations):
                 X, i[-1].astype(int), self.max_window
             )
             dts = spk_in_window[0] - i[0]
-            ll = optional_log(
-                self.linear_non_linear_vec(dts, weights[spk_in_window[1].astype(int)], bias)
-            )
-
-            lam_s += ll
+            lam_tilde = self.compute_lam_tilde(dts, weights[spk_in_window[1].astype(int), :, i[1].astype(int), None],
+                                          bias[i[1].astype(int)])
+            lam_s += optional_log(self.inverse_link_function(lam_tilde)).sum()
             return lam_s, None
 
-        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.zeros(n_neurons), idxs), in_axes=1)
+        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.zeros(n_target), idxs), in_axes=1)
+
         shifted_spikes_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
         out, _ = scan_vmap(shifted_spikes_array)
         sub, _ = scan_vmap(padding[None, :])
-        ll_term = jnp.sum(out, axis=0) - jnp.sum(sub, axis=0)
-        return ll_term.sum()
-
-    def compute_summed_ll_vec(
-            self,
-            X: DESIGN_INPUT_TYPE,
-            y: jnp.array,
-            params: Tuple[jnp.array, jnp.array],
-            log=True
-    ):
-        optional_log = jnp.log if log else lambda x: x
-        weights, bias = params
-        n_neurons = weights.shape[1]
-        weights = weights.reshape(-1, self.n_basis_funcs, n_neurons)
-        n_neurons = weights.shape[2]
-
-        # body of the scan function
-        def scan_fn(lam_s, i):
-            spk_in_window = utils.slice_array(
-                X, i[-1].astype(int), self.max_window
-            )
-            dts = spk_in_window[0] - i[0]
-            ll = optional_log(
-                self.linear_non_linear(dts, weights[spk_in_window[1].astype(int),:,i[1].astype(int)], bias[i[1].astype(int)])
-            )
-            lam_s = lam_s.at[i[1].astype(int)].add(ll)
-
-            return lam_s, None
-
-        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.zeros(n_neurons), idxs), in_axes=1)
-        shifted_spikes_array, _ = utils.reshape_for_vmap(y, self.n_batches_scan)
-        out, _ = scan_vmap(shifted_spikes_array)
-        # sub, _ = scan_vmap(padding[None, :])
-        ll_term = jnp.sum(out, axis=0) #- jnp.sum(sub, axis=0)
-        return ll_term.sum()
+        return jnp.sum(out) - jnp.sum(sub)
 
     def _negative_log_likelihood(
             self,
             X,
             y,
-            params: Optional=None,
-            random_key: Optional=None,
+            params: Optional = None,
+            random_key: Optional = None,
     ):
         r"""
         computes Poisson point process negative log-likelihood with MC estimate of the CIF
@@ -225,8 +216,7 @@ class MonteCarloApproximation(Observations):
             negative log-likelihood, shape (1,)
         """
 
-
-        log_lam_y = self.ll_function(
+        log_lam_y = self.compute_summed_ll(
             X,
             y,
             params,
@@ -238,12 +228,9 @@ class MonteCarloApproximation(Observations):
             X,
             mc_samples,
             params,
-            log=False
         )
 
-        estimated_rate = (self.T/self.M) * mc_estimate
-
-        return estimated_rate - log_lam_y
+        return mc_estimate - log_lam_y
 
     def _predict(
             self,
@@ -260,7 +247,7 @@ class MonteCarloApproximation(Observations):
                 X, t[-1].astype(int), self.max_window
             )
             dts = spk_in_window[0] - t[0]
-            pred_rate = self.intensity_function(dts, weights[spk_in_window[1].astype(int)], bias)
+            pred_rate = self.inverse_link_function(self.compute_lam_tilde(dts, weights[spk_in_window[1].astype(int)], bias))
             return None, pred_rate
 
         scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(int_f_scan, None, idxs), in_axes=1, out_axes=1)
@@ -269,19 +256,15 @@ class MonteCarloApproximation(Observations):
         duration = end - start
 
         weights, bias = params
-        if len(weights.shape) == 1:
-            n_neurons = 1
-            weights = weights.reshape(-1, self.n_basis_funcs)
-        else:
-            n_neurons = weights.shape[1]
-            weights = weights.reshape(-1, self.n_basis_funcs, n_neurons)
+        weights = utils.reshape_w(weights, self.n_basis_funcs)
+        n_target = weights.shape[-1]
         X = utils.adjust_indices_and_spike_times(X, self.history_window, self.max_window)
 
-        bin_times = jnp.linspace(start+bin_size, end, int(duration / bin_size)) - bin_size / 2
+        bin_times = jnp.linspace(start + bin_size, end, int(duration / bin_size)) - bin_size / 2
         bin_idx = jnp.searchsorted(X[0], bin_times, "right")
         bin_array, _ = utils.reshape_for_vmap(jnp.vstack((bin_times, bin_idx)), int(n_batches_scan))
         _, out = scan_vmap(bin_array)
-        return out.reshape(-1, n_neurons).squeeze()[:bin_times.size]
+        return out.reshape(-1, n_target).squeeze()[:bin_times.size]
 
     def log_likelihood(
             self,
@@ -421,15 +404,11 @@ class PolynomialApproximation(MonteCarloApproximation):
         self.prod_int_function = prod_int_function
         self.int_function = int_function
 
-    def _set_ll_function(self, population=False):
-        self.ll_function = self.compute_summed_ll_vec if population else self.compute_summed_ll
-        self.ll_function_MC = self.compute_summed_ll_vec_MC if population else self.compute_summed_ll
-        self.intensity_function = self.linear_non_linear_vec if population else self.linear_non_linear
-
     def _initialize_data_params(
             self,
             recording_time,
             max_window: int,
+            X: Optional=None,
     ):
         if self.recording_time is None:
             self.recording_time = recording_time
@@ -702,7 +681,7 @@ class PolynomialApproximation(MonteCarloApproximation):
                 X, t[-1].astype(int), self.max_window
             )
             dts = spk_in_window[0] - t[0]
-            dot_prod = self.sum_basis_and_dot(weights[spk_in_window[1].astype(int)], dts) + bias
+            dot_prod = self.compute_lam_tilde(dts, weights[spk_in_window[1].astype(int)], bias)
             pred_rate = utils.quadratic(dot_prod, self.inverse_link_function, approx_interval)
             return None, pred_rate
 
@@ -712,14 +691,15 @@ class PolynomialApproximation(MonteCarloApproximation):
         duration = end - start
 
         weights, bias = params
-        weights = weights.reshape(-1, self.n_basis_funcs)
+        weights = utils.reshape_w(weights, self.n_basis_funcs)
+        n_target = weights.shape[-1]
         X = utils.adjust_indices_and_spike_times(X, self.history_window, self.max_window)
 
         bin_times = jnp.linspace(start+bin_size, end, int(duration / bin_size)) - bin_size / 2
         bin_idx = jnp.searchsorted(X[0], bin_times, "right")
         bin_array, _ = utils.reshape_for_vmap(jnp.vstack((bin_times, bin_idx)), int(n_batches_scan))
         _, out = scan_vmap(bin_array)
-        return out.transpose(1,0,2).ravel()[:bin_times.size]
+        return out.reshape(-1, n_target).squeeze()[:bin_times.size]
 
 
 class PopulationPolynomialApproximation(PolynomialApproximation):
@@ -757,11 +737,6 @@ class PopulationPolynomialApproximation(PolynomialApproximation):
         self.eval_function = eval_function
         self.prod_int_function = prod_int_function
         self.int_function = int_function
-
-    def _set_ll_function(self, population=True):
-        self.ll_function = self.compute_summed_ll_vec if population else self.compute_summed_ll
-        self.ll_function_MC = self.compute_summed_ll_vec_MC if population else self.compute_summed_ll
-        self.intensity_function = self.linear_non_linear_vec if population else self.linear_non_linear
 
     def integral_approximation(self, params, approx_interval):
         w = jnp.vstack((params[0], params[1]))
@@ -835,59 +810,3 @@ class PopulationPolynomialApproximation(PolynomialApproximation):
             weights_cf = jax.vmap(weights_cf_single, in_axes=(2, 1), out_axes=1)(a, b)
 
         return (weights_cf[:-1], weights_cf[-1])
-
-    def _negative_log_likelihood(
-            self,
-            X,
-            y,
-            params: Optional = None,
-            random_key: Optional = None,
-            suff: Optional = None,
-            approx_interval: Optional = None,
-    ):
-        log_lam_y = self.compute_summed_ll_vec(
-            X,
-            y,
-            params,
-            log=True
-        )
-
-        estimated_rate = self.integral_approximation(params, approx_interval)
-
-        return estimated_rate.sum() - log_lam_y
-
-    def _predict(
-            self,
-            X: Union[DESIGN_INPUT_TYPE, ArrayLike],
-            params: Tuple[jnp.array, jnp.array],
-            approx_interval: Optional = None,
-            bin_size: Optional = 0.001,
-            time_int: Optional = None,
-            n_batches_scan=1,
-    ) -> jnp.ndarray:
-        """Predict rates based on fit parameters."""
-
-        def int_f_scan(carry, t):
-            spk_in_window = utils.slice_array(
-                X, t[-1].astype(int), self.max_window
-            )
-            dts = spk_in_window[0] - t[0]
-            dot_prod = self.sum_basis_and_dot_vec(weights[spk_in_window[1].astype(int)], dts) + bias
-            pred_rate = utils.quadratic(dot_prod, self.inverse_link_function, approx_interval)
-            return None, pred_rate
-
-        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(int_f_scan, None, idxs), in_axes=1, out_axes=1)
-
-        start, end = time_int
-        duration = end - start
-
-        weights, bias = params
-        n_neurons = weights.shape[1]
-        weights = weights.reshape(-1, self.n_basis_funcs, n_neurons)
-        X = utils.adjust_indices_and_spike_times(X, self.history_window, self.max_window)
-
-        bin_times = jnp.linspace(start+bin_size, end, int(duration / bin_size)) - bin_size / 2
-        bin_idx = jnp.searchsorted(X[0], bin_times, "right")
-        bin_array, _ = utils.reshape_for_vmap(jnp.vstack((bin_times, bin_idx)), int(n_batches_scan))
-        _, out = scan_vmap(bin_array)
-        return out.reshape(-1, n_neurons)[:bin_times.size]

@@ -262,9 +262,6 @@ class ContinuousMC(BaseRegressor):
         if self.T is None:
             self.T = jnp.ceil(self.recording_time.tot_length())
 
-    def _set_obs_model(self, population=False):
-        self.observation_model._set_ll_function(population)
-
     def initialize_state(
             self,
             X: DESIGN_INPUT_TYPE,
@@ -274,8 +271,8 @@ class ContinuousMC(BaseRegressor):
         """Initialize the state of the solver for running fit and update."""
         # set data dependent parameters
         self._initialize_data_params(X, y)
-        self.observation_model._initialize_data_params(self.recording_time,self.max_window)
-        self._set_obs_model()
+        self.observation_model._initialize_data_params(self.recording_time,self.max_window, X)
+        self.observation_model._set_ll_function()
 
         #add max window padding to X and y
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
@@ -314,8 +311,8 @@ class ContinuousMC(BaseRegressor):
         """Fit the model to neural activity."""
         # set data dependent parameters
         self._initialize_data_params(X, y)
-        self.observation_model._initialize_data_params(self.recording_time, self.max_window)
-        self._set_obs_model()
+        self.observation_model._initialize_data_params(self.recording_time, self.max_window, X)
+        self.observation_model._set_ll_function()
 
         #add max window padding to X and y
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
@@ -357,7 +354,7 @@ class ContinuousMC(BaseRegressor):
         """Run a single update step of the jaxopt solver."""
         # set data dependent parameters
         self._initialize_data_params(X, y)
-        # self.observation_model._initialize_data_params(self.recording_time, self.max_window)
+        # self.observation_model._initialize_data_params(self.recording_time, self.max_window, X)
         # self._set_obs_model()
 
         #add max window padding to X and y
@@ -550,9 +547,6 @@ class PopulationContinuousMC(ContinuousMC):
         )
         return init_params
 
-    def _set_obs_model(self, population=True):
-        self.observation_model._set_ll_function(population)
-
 
 class ContinuousPA(ContinuousMC):
     def __init__(
@@ -604,9 +598,6 @@ class ContinuousPA(ContinuousMC):
 
         return neg_ll
 
-    def _set_obs_model(self, population=False):
-        self.observation_model._set_ll_function(population)
-
     def initialize_state(
             self,
             X: DESIGN_INPUT_TYPE,
@@ -618,7 +609,6 @@ class ContinuousPA(ContinuousMC):
         self._initialize_data_params(X, y)
         self._set_regularizer_strength()
         self.observation_model._initialize_data_params(self.recording_time, self.max_window)
-        self._set_obs_model()
 
         # add max window padding to X and y
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
@@ -663,7 +653,6 @@ class ContinuousPA(ContinuousMC):
         self._initialize_data_params(X, y)
         self._set_regularizer_strength()
         self.observation_model._initialize_data_params(self.recording_time, self.max_window)
-        self._set_obs_model()
 
         #add max window padding to X and y
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
@@ -910,10 +899,6 @@ class PopulationContinuousPA(ContinuousPA):
             raise ValueError(
                 "X must have shape 2 at dimension 0 corresponding to spike times and neurons ids"
             )
-
-    def _set_obs_model(self, population=True):
-        self.observation_model._set_ll_function(population)
-
 
     def _initialize_intercept_matching_mean_rate(
             self,
