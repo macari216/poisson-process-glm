@@ -5,23 +5,6 @@ import pynapple as nap
 import nemos as nmo
 from scipy.optimize import bisect
 
-def spike_times_uniform(tot_time_sec, tot_spikes_n, n_neurons, seed=216):
-    np.random.seed(seed)
-    tot_spikes = np.sort(np.random.uniform(0, tot_time_sec, size=tot_spikes_n))
-    neuron_ids = np.random.choice(n_neurons, size=len(tot_spikes))
-    spike_dict = {key: nap.Ts(tot_spikes[np.arange(len(tot_spikes))[neuron_ids == key]]) for key in range(n_neurons)}
-    spikes_tsgroup = nap.TsGroup(spike_dict, nap.IntervalSet(0, tot_time_sec))
-
-    return spikes_tsgroup
-
-def times_to_xy(spikes, basis, posts_n, binsize, window_size):
-    y = jnp.array(spikes.count(binsize)).squeeze()
-    X = basis.compute_features(y)
-    y, X = y[window_size:], X[window_size:]
-    y = y[:, posts_n]
-
-    return X, y
-
 def poisson_counts(mean_per_sec, bias_per_sec, binsize, n_bins_tot, n_pres, weights_true, ws, basis, nonlin, seed=216):
     if mean_per_sec < 0 or bias_per_sec < 0:
         raise ValueError(
@@ -50,12 +33,13 @@ def poisson_counts(mean_per_sec, bias_per_sec, binsize, n_bins_tot, n_pres, weig
 
     return X, posts_spikes, jnp.array(pres_spikes)[ws:], lam_posts
 
-def poisson_counts_recurrent(n_bins_tot, n_neurons, window_size, basis_kernels, params, inv_link):
+def poisson_counts_recurrent(n_bins_tot, n_neurons, window_size, basis_kernels, params, inv_link, init_spikes=None, seed=123):
     # parameters for simulator
     feedforward_input = np.zeros((n_bins_tot, n_neurons, 1))
     feedforward_coef = np.zeros((n_neurons, 1))
-    init_spikes = np.zeros((window_size, n_neurons))
-    random_key = jax.random.key(123)
+    if init_spikes is None:
+        init_spikes = np.zeros((window_size, n_neurons))
+    random_key = jax.random.key(seed)
     coefs, intercepts = params
 
     # generate poisson firing rates per bin

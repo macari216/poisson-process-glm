@@ -2,15 +2,13 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
-from jax.scipy.special import gamma, gammainc, factorial
+from jax.scipy.special import gamma, gammainc, factorial, gammaln
 from scipy.special import laguerre, genlaguerre
 
 import numpy as np
 from sklearn.decomposition import PCA
 
-from .utils import comb
-
-from time import perf_counter
+from .utils import comb, std_laguerre_binom, gen_laguerre_binom
 
 jax.config.update("jax_enable_x64", True)
 
@@ -130,15 +128,16 @@ def gp_basis(ws, n_fun, gamma=50, seed=0, rh=1, len_sc=0.12, a=50., b=0.001, w=0
     alpha = a*((x-delay)**2)*np.exp(-(x-delay) / w) + b
     alpha[x<delay] = b
     synapse_K = K_log*alpha[None,:]
-    samp_GP = np.array(np.random.multivariate_normal(np.zeros(ws), synapse_K,10000))
+    samp_GP = np.array(np.random.multivariate_normal(np.zeros(ws), synapse_K,10000)).T
     pca = PCA(n_components=n_fun)
-    pca.fit(samp_GP)
+    pca.fit(samp_GP.T)
     dx = 1 / (ws - 1)  # Grid spacing
     norm_factor = np.sqrt(dx)
     basis_kernel = pca.components_.T / norm_factor
     var_expl = pca.explained_variance_ * dx
     return basis_kernel, var_expl, x
 
+# evaluation functions
 def LaguerreEval(ws, n_basis_funcs, c=1.0, max_x=30.):
     P = np.zeros((n_basis_funcs, n_basis_funcs))
     for n in range(n_basis_funcs):
@@ -156,7 +155,7 @@ def LaguerreEval(ws, n_basis_funcs, c=1.0, max_x=30.):
     eval_func = lambda dts: basis_funcs(dts, ws, P, c, max_x)
     return eval_func
 
-def GenLaguerreEval(ws, n_basis_funcs, c=2.0, alpha=1.0, max_x=30.):
+def GenLaguerreEval(ws, n_basis_funcs, c=1.5, alpha=2.0, max_x=30.):
     P = np.zeros((n_basis_funcs, n_basis_funcs))
     for n in range(n_basis_funcs):
         P[n, :(n+1)] = genlaguerre(n, alpha).coef[::-1]
@@ -166,90 +165,95 @@ def GenLaguerreEval(ws, n_basis_funcs, c=2.0, alpha=1.0, max_x=30.):
         x = -x / ws
         x = jnp.where(jnp.abs(x) > 1, 1, x)
         x *= max_x
-        out = jnp.exp(-c * x/2) * jnp.power(c * x, alpha) * jnp.polyval(p[::-1], c * x)
+        out = jnp.exp(-c * x/2) * jnp.power(c * x, alpha/2) * jnp.polyval(p[::-1], c * x)
         return out.T
     basis_funcs = jax.vmap(bf_eval, in_axes=(None, None, 0, None, None, None), out_axes=1)
 
     eval_func = lambda dts: basis_funcs(dts, ws, P, c, alpha, max_x)
     return eval_func
 
-@partial(jax.jit, static_argnums=(1, 2, 3, 4))
-def laguerre_int(x, ws, n_basis_funcs, c=1.0, max_x=30.):
-    """Compute the integral I_n(x) = ∫_0^x L_n(t) * exp(-ct) dt using incomplete gamma function."""
+# integral
+@partial(jax.jit, static_argnums=(1, 2, 3, 4, 5))
+def gen_laguerre_int(x, ws, n_basis_funcs, c=1.5, alpha=0., max_x=30.):
     x = -x / ws
     x = jnp.where(jnp.abs(x) > 1, 1, x)
     x *= max_x
-
     n = jnp.arange(n_basis_funcs)[:, None]
-    k = jnp.arange(n_basis_funcs + 1)[None, :]
-
-    combs = comb(n, k) * (k <= n)
+    k = jnp.arange(n_basis_funcs)[None, :]
+    if alpha != 0:
+        combs = jnp.where(k <= n, comb(n+alpha, n-k), 0.0)
+    else:
+        combs = jnp.where(k <= n, comb(n, k), 0.0)
     comb_nk = combs[n, k]
     coeffs = ((-1) ** (k)) / (factorial(k)) * comb_nk
-    powers = k + 1
-    terms = lambda x: gammainc(powers, c * x/2) * gamma(powers) * (2 ** powers/c)
-
+    powers = k + 1 + alpha/2
+    terms = lambda x: gammainc(powers, c/2 * x) * gamma(powers) * (2 ** powers/c)
     integrals = coeffs * terms(x)
     return (integrals.sum(1) / max_x) * ws
 
-def precompute_laguerre_coeffs(N, c=1.0):
+def GenLaguerreInt(ws, n_basis_funcs, c=1.5, alpha=2, max_x=30.):
+    int_func = lambda x: gen_laguerre_int(x, ws, n_basis_funcs, c, alpha, max_x)
+    return int_func
+
+# product integral
+def precompute_gen_laguerre_coeffs(N, c=1.5, alpha=2):
     idx = jnp.arange(N)
-    binom = jnp.where(idx[None, :] <= idx[:, None], comb(idx[:, None], idx[None, :]), 0.0)
-    factorials = gamma(idx + 1)
+    r_idx = jnp.arange(N+jnp.floor(alpha/2).astype(int))
+    i, j = jnp.meshgrid(idx, idx, indexing='ij')
+    i_a, j_a = jnp.meshgrid(idx+alpha/2, r_idx, indexing='ij')
+    if alpha != 0:
+        binom, binom_kr = gen_laguerre_binom(i, j, i_a, j_a, alpha)
+    else:
+        binom, binom_kr = std_laguerre_binom(i, j)
+    factorials = jnp.exp(gammaln(idx + 1))
     factorials_kj = (1 / factorials)[:, None] * (1 / factorials)[None, :]
-    sign_kj = (-1.0) ** (idx[:, None] + idx[None, :])
-    powers_rj = idx[:, None] + idx[None, :] + 1
-    c_powers_rj = 1. / (c ** powers_rj)
-    powers_kr = (idx[:, None] - idx[None, :])
-    n, m, k, j, r = jnp.ix_(idx, idx, idx, idx, idx)
-    jnp.where(powers_kr >= 0, jnp.power(c, powers_kr), 0.0)
+    sign_kj = (-1.0) ** (i + j)
+    powers_rj = r_idx[:, None] + idx[None, :] + 1 + alpha/2
+    powers_kr = idx[:, None] - r_idx[None, :] + alpha/2
+    n, m, k, j, r = jnp.ix_(idx, idx, idx, idx, r_idx)
     coeffs = (
             binom[n, k] *
             binom[m, j] *
             sign_kj[k, j] *
             factorials_kj[k, j] *
-            binom[k, r] *
-            c_powers_rj[r, j] *
-            gamma(powers_rj[r, j])
+            binom_kr[k, r] *
+            gamma(powers_rj[r, j]) *
+            jnp.where(powers_kr[k, r] >= 0, jnp.power(c, (powers_kr-1)[k, r]), 0.0)
     )
-    return (coeffs, powers_kr[k, r], powers_rj[r, j])
+    return (coeffs, powers_kr[k,r], powers_rj[r, j])
+
+@jax.jit
+def delta_powers(delta, powers):
+    """helps to deal with a special case when alpha is odd and delta=0"""
+    normal = jnp.where(powers >= 0, jnp.power(delta, powers), 0.0)
+    argmin = jnp.argmin(jnp.abs(powers), axis=-1, keepdims=True)
+    one_hot = jnp.equal(jnp.arange(powers.shape[-1]), argmin)
+    patch = one_hot.astype(delta.dtype)
+    return jnp.where(delta == 0.0, patch, normal)
 
 @partial(jax.jit, static_argnums=(1, 3, 4))
-def laguerre_prod_int(xs, ws, const, c=1.0, max_x=30.):
-    def single_product_integral(x):
-        x = -x / ws
-        x = jnp.where(jnp.abs(x) > 1, 1, x)
-        x *= max_x
-        terms = (jnp.exp(-c * x / 2)
-                 * jnp.where(const[1] >= 0, jnp.power(x, const[1]), 0.0)
-                 * gammainc(const[2], c * (max_x - x))
-                 )
+def gen_laguerre_prod_int(xs, ws, const, c=1.5, max_x=30.):
+    def single_product_integral(delta):
+        delta = -delta / ws
+        delta = jnp.where(jnp.abs(delta) > 1, 1, delta)
+        delta *= max_x
+        terms = (
+            jnp.exp(-c * delta / 2)
+            * delta_powers(delta, const[1])
+            * gammainc(const[2], c * (max_x - delta))
+        )
         integrals = const[0] * terms
-        out = integrals.sum(axis=(2, 3, 4)) / max_x * ws
+        out = (integrals.sum(axis=(2,3,4)) / max_x) * ws
         return out
     out_vmap = jax.vmap(single_product_integral)(xs)
     return out_vmap
 
-def LaguerreInt(ws, n_basis_funcs, c=1.0, max_x=30.):
-    int_func = lambda x: laguerre_int(x, ws, n_basis_funcs, c, max_x)
-    return int_func
-
-def LaguerreProdIntegral(ws, n_basis_funcs, c=1.0, max_x=30):
-    const = precompute_laguerre_coeffs(n_basis_funcs, c)
-    prod_int_func = lambda dts: laguerre_prod_int(dts, ws, const, c, max_x)
+def LaguerreProdIntegral(ws, n_basis_funcs, c=1.0, alpha=0, max_x=30.):
+    const = precompute_gen_laguerre_coeffs(n_basis_funcs, c, alpha)
+    prod_int_func = lambda dts: gen_laguerre_prod_int(dts, ws, const, c, max_x)
     return prod_int_func
 
-
-
-
-# class LaguerreBasis:
-#     def __init__(self):
-#         pass
-#     def precompute_coeffs(self):
-#         pass
-#     def evaluate(self):
-#         pass
-#     def integral(self):
-#         pass
-#     def product_integral(self):
-#         pass
+def GenLaguerreProdIntegral(ws, n_basis_funcs, c=1.5, alpha=2, max_x=30.):
+    const = precompute_gen_laguerre_coeffs(n_basis_funcs, c, alpha)
+    prod_int_func = lambda dts: gen_laguerre_prod_int(dts, ws, const, c, max_x)
+    return prod_int_func

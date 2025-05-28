@@ -1,7 +1,9 @@
 import os
 import jax
 import jax.numpy as jnp
+
 import nemos as nmo
+import pynapple as nap
 import numpy as np
 import matplotlib.pyplot as plt
 from time import perf_counter
@@ -12,42 +14,41 @@ from poisson_point_process import simulate
 from poisson_point_process.poisson_process_glm import ContinuousPA
 from poisson_point_process.poisson_process_obs_model import PolynomialApproximation
 from poisson_point_process.utils import quadratic
-from poisson_point_process.basis import RaisedCosineLogEval, LaguerreEval
+from poisson_point_process.basis import GenLaguerreEval, GenLaguerreInt, GenLaguerreProdIntegral
 
 jax.config.update("jax_enable_x64", True)
-os.environ["JAX_PLATFORM_NAME"] = "cpu"
+# os.environ["JAX_PLATFORM_NAME"] = "cpu"
+print("JAX is using:", jax.default_backend())
 
 # generate data
-n_neurons = 5
-history_window = 0.004
+n_neurons = 12
+history_window = 0.005
 tot_time_sec = 1000
 binsize = 0.0001
 window_size = int(history_window / binsize)
-n_basis_funcs = 4
+n_basis_funcs = 5
 n_bins_tot = int(tot_time_sec / binsize)
 n_batches_scan = 1
-# rc_basis = nmo.basis.RaisedCosineLogConv(n_basis_funcs, window_size=window_size)
-# time, kernels = rc_basis.evaluate_on_grid(window_size)
-# time *= history_window
-# inverse_link = jax.nn.softplus
-# link_f = lambda x: jnp.log(jnp.exp(x) -1.)
 inverse_link = jnp.exp
 link_f = jnp.log
 
-basis_fn = LaguerreEval(history_window, n_basis_funcs)
+basis_fn = GenLaguerreEval(history_window, n_basis_funcs)
 time = jnp.linspace(0,history_window,window_size)
 kernels = basis_fn(-time)
+int_fn = GenLaguerreInt(history_window, n_basis_funcs)
+prod_int_fn = GenLaguerreProdIntegral(history_window, n_basis_funcs)
 
 np.random.seed(123)
 
 ####
-pres_rate_per_sec = 10
+pres_rate_per_sec = 5
 posts_rate_per_sec = 3
-# rescaled proportionally to the binsize
-bias_true = posts_rate_per_sec + np.log(binsize)
-posts_rate_sim = inverse_link(posts_rate_per_sec + np.log(binsize)) / binsize
-weights_true = np.random.normal(0, 0.3, n_neurons * n_basis_funcs)
-# weights_true = jnp.array([0.5,0.3,0.2,0.4])
+
+bias_true = jnp.log(posts_rate_per_sec) + jnp.log(binsize)
+# posts_rate_sim = inverse_link(posts_rate_per_sec + np.log(binsize)) / binsize
+weights_true = np.random.normal(0, 1, n_neurons * n_basis_funcs)
+# weights_true[::n_basis_funcs] = np.random.normal(0, 0.1, n_neurons)
+
 X, y_counts, X_counts, lam_posts = simulate.poisson_counts(pres_rate_per_sec, posts_rate_per_sec, binsize,
                                                            n_bins_tot, n_neurons, weights_true, window_size, kernels,
                                                            inverse_link)
@@ -80,8 +81,8 @@ mean_rate = spike_times_y.size / tot_time_sec
 #     float(link_f(mean_rate*binsize) + bounds[0]),
 #     float(link_f(mean_rate*binsize) + bounds[1]),
 # ]
-interval = [np.percentile(link_f(lam_posts/binsize), 2.5), np.percentile(link_f(lam_posts/binsize), 97.5)]
-interval_discrete = [np.percentile(link_f(lam_posts), 2.5), np.percentile(link_f(lam_posts), 97.5)]
+interval = [np.percentile(link_f(lam_posts/binsize), 0.5), np.percentile(link_f(lam_posts/binsize), 97.5)]
+interval_discrete = [np.percentile(link_f(lam_posts), 0.5), np.percentile(link_f(lam_posts), 97.5)]
 # print([np.percentile(link_f(lam_posts/binsize), 2.5), np.percentile(link_f(lam_posts/binsize), 97.5)])
 print(interval)
 print(interval_discrete)
@@ -102,13 +103,19 @@ obs_model_pa = PolynomialApproximation(
     n_basis_funcs=n_basis_funcs,
     n_batches_scan=n_batches_scan,
     history_window=history_window,
-    window_size=window_size,
-    approx_interval=interval,
     eval_function=basis_fn,
+    int_function = int_fn,
+    prod_int_function= prod_int_fn,
 )
 
 tt0 = perf_counter()
-model_pa = ContinuousPA(solver_name="LBFGS", observation_model=obs_model_pa, solver_kwargs={"tol":1e-12}).fit_closed_form(X_spikes, y_spikes)
+model_pa = ContinuousPA(
+    solver_name="LBFGS",
+    observation_model=obs_model_pa,
+    approx_interval=interval,
+    recording_time=nap.IntervalSet(0,tot_time_sec),
+    solver_kwargs={"tol":1e-12}
+).fit_closed_form(X_spikes, y_spikes)
 print(f"fit continuous PA GLM model, {perf_counter() - tt0}")
 
 obs_model_exact = nmo.observation_models.PoissonObservations(inverse_link)
@@ -139,28 +146,28 @@ filters_nemos = np.dot(weights_nemos, kernels.T) + bias_nemos
 filters_true = np.dot(weights_true.reshape(-1,n_basis_funcs), kernels.T) + bias_true
 
 # scores
-pred_pa = model_pa.predict(X_spikes, binsize)
-pred_paglm = quadratic(np.dot(X, weights_d[:-1])+weights_d[-1], inverse_link, interval_discrete)
-pred_exact = model_exact.predict(X)
-print(f"continuous PA GLM pseudo-r2 score: {np.round(obs_model_exact.pseudo_r2(y_counts, pred_pa*binsize, score_type="pseudo-r2-Cohen"), 5)}")
-print(f"discrete GLM pseudo-r2  score: {np.round(obs_model_exact.pseudo_r2(y_counts, pred_exact, score_type="pseudo-r2-Cohen"), 5)}")
-print(f"discrete PA GLM pseudo-r2  score: {np.round(obs_model_exact.pseudo_r2(y_counts, pred_paglm, score_type="pseudo-r2-Cohen"), 5)}")
-
-#compare predicted rate
-def select_spk(spikes, ep):
-    return spikes[0, (spikes[0]>ep[0]*binsize)&(spikes[0]<ep[1]*binsize)]/binsize
-eps = [(260000,270000),(710000,720000)]
-fig, axs = plt.subplots(2,1, figsize=(12,6))
-for i, ax in enumerate(axs):
-    ax.plot(np.arange(eps[i][0],eps[i][1]), lam_posts[eps[i][0]:eps[i][1]]/binsize, c='g', lw=0.5, label="true")
-    ax.plot(np.arange(eps[i][0],eps[i][1]), pred_exact[eps[i][0]:eps[i][1]]/binsize, c='k', lw=0.5, label="exact")
-    ax.plot(np.arange(eps[i][0], eps[i][1]), pred_paglm[eps[i][0]:eps[i][1]]/binsize, c='b', lw=0.5, label="pa discrete")
-    ax.plot(np.arange(eps[i][0], eps[i][1]), pred_pa[eps[i][0]:eps[i][1]], c='r', lw=0.5, label="pa continuous")
-    ax.vlines(select_spk(y_spikes, eps[i]), -10, pred_pa[eps[i][0]:eps[i][1]].min(), color='darkblue', lw=0.8, label="spikes")
-    ax.set_xlabel("time (s)")
-    ax.set_ylabel("firing rate (Hz)")
-axs[0].legend(loc="upper right")
-plt.tight_layout()
+# pred_pa = model_pa.predict(X_spikes, binsize)
+# pred_paglm = quadratic(np.dot(X, weights_d[:-1])+weights_d[-1], inverse_link, interval_discrete)
+# pred_exact = model_exact.predict(X)
+# print(f"continuous PA GLM pseudo-r2 score: {np.round(obs_model_exact.pseudo_r2(y_counts, pred_pa*binsize, score_type="pseudo-r2-Cohen"), 5)}")
+# print(f"discrete GLM pseudo-r2  score: {np.round(obs_model_exact.pseudo_r2(y_counts, pred_exact, score_type="pseudo-r2-Cohen"), 5)}")
+# print(f"discrete PA GLM pseudo-r2  score: {np.round(obs_model_exact.pseudo_r2(y_counts, pred_paglm, score_type="pseudo-r2-Cohen"), 5)}")
+#
+# #compare predicted rate
+# def select_spk(spikes, ep):
+#     return spikes[0, (spikes[0]>ep[0]*binsize)&(spikes[0]<ep[1]*binsize)]/binsize
+# eps = [(260000,270000),(710000,720000)]
+# fig, axs = plt.subplots(2,1, figsize=(12,6))
+# for i, ax in enumerate(axs):
+#     ax.plot(np.arange(eps[i][0],eps[i][1]), lam_posts[eps[i][0]:eps[i][1]]/binsize, c='g', lw=0.5, label="true")
+#     ax.plot(np.arange(eps[i][0],eps[i][1]), pred_exact[eps[i][0]:eps[i][1]]/binsize, c='k', lw=0.5, label="exact")
+#     ax.plot(np.arange(eps[i][0], eps[i][1]), pred_paglm[eps[i][0]:eps[i][1]]/binsize, c='b', lw=0.5, label="pa discrete")
+#     ax.plot(np.arange(eps[i][0], eps[i][1]), pred_pa[eps[i][0]:eps[i][1]], c='r', lw=0.5, label="pa continuous")
+#     ax.vlines(select_spk(y_spikes, eps[i]), -10, pred_pa[eps[i][0]:eps[i][1]].min(), color='darkblue', lw=0.8, label="spikes")
+#     ax.set_xlabel("time (s)")
+#     ax.set_ylabel("firing rate (Hz)")
+# axs[0].legend(loc="upper right")
+# plt.tight_layout()
 
 # compare filters
 fig, axs = plt.subplots(3,2,figsize=(7,9))

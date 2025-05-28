@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from poisson_point_process import simulate
 from poisson_point_process.poisson_process_glm import ContinuousMC
 from poisson_point_process.poisson_process_obs_model import MonteCarloApproximation
-from poisson_point_process.basis import gp_basis, ChebyshevInterpolation, RaisedCosineLogEval
+from poisson_point_process.basis import GenLaguerreEval
 
 jax.config.update("jax_enable_x64", True)
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
@@ -36,13 +36,17 @@ link_f = lambda x: jnp.log(jnp.exp(x) -1.)
 
 np.random.seed(216)
 
+basis_fn = GenLaguerreEval(history_window, n_basis_funcs)
+time = jnp.linspace(0,history_window,window_size)
+kernels = basis_fn(-time)
+
 t0 = perf_counter()
 if all_to_all:
     # all-to-all connectivity (bias and weights)
 
     # true parameters
-    baseline_fr = 0.9
-    biases = jnp.array(np.abs(np.random.normal(baseline_fr, baseline_fr / 10, n_neurons))) + np.log(binsize)
+    baseline_fr = 3
+    biases = jnp.log(jnp.abs(np.random.normal(baseline_fr, baseline_fr / 10, n_neurons))) + jnp.log(binsize)
     bias_true = biases[target_neu_id]
     posts_rate_per_sec = biases[target_neu_id] - np.log(binsize)
 
@@ -98,12 +102,6 @@ else:
 
 print(f"generated data: {np.round(perf_counter() - t0, 5)}")
 
-# polynomial basis
-gp_kernels, gp_var, grid = gp_basis(window_size, n_basis_funcs, w=0.065, len_sc=0.12, rh=1, a=50, b=0.001, delay=0.0)
-kernels = gp_var * gp_kernels
-basis_fn = ChebyshevInterpolation(grid, kernels, history_window)
-# basis_fn = RaisedCosineLogEval(history_window, n_basis_funcs)
-
 obs_model = MonteCarloApproximation(
     n_basis_funcs=n_basis_funcs,
     n_batches_scan=n_batches_scan,
@@ -131,7 +129,7 @@ for step in range(num_iter):
     error[step] = state.error
     # error[step] = model._negative_log_likelihood(X_spikes, y_spikes, params, state.aux)
     t1 = perf_counter()
-    if step % 50 == 0:
+    if step % 10 == 0:
         print(f"step {step}, time: {t1 - t0}, error: {error[step]}")
 print(f"fit model, {perf_counter() - tt0}")
 plt.plot(error)

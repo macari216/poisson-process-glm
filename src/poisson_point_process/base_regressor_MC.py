@@ -27,15 +27,7 @@ class BaseRegressor(Base, abc.ABC):
     This class encapsulates the common functionality for Generalized Linear Models (GLM)
     regression models. It provides an abstraction for fitting the model, making predictions,
     scoring the model, simulating responses, and preprocessing data. Concrete classes
-    are expected to provide specific implementations of the abstract methods defined here.
-    Below is a table listing the default and available solvers for each regularizer.
-
-    | Regularizer   | Default Solver   | Available Solvers                                           |
-    | ------------- | ---------------- | ----------------------------------------------------------- |
-    | UnRegularized | GradientDescent  | GradientDescent, BFGS, LBFGS, NonlinearCG, ProximalGradient |
-    | Ridge         | GradientDescent  | GradientDescent, BFGS, LBFGS, NonlinearCG, ProximalGradient |
-    | Lasso         | ProximalGradient | ProximalGradient                                            |
-    | GroupLasso    | ProximalGradient | ProximalGradient                                            |
+    are expected to provide specific implementations of the abstract methods defined here.         |
 
     Parameters
     ----------
@@ -55,13 +47,6 @@ class BaseRegressor(Base, abc.ABC):
         Optional dictionary for keyword arguments that are passed to the solver when instantiated.
         E.g. stepsize, acceleration, value_and_grad, etc.
          See the jaxopt documentation for details on each solver's kwargs: https://jaxopt.github.io/stable/
-
-    See Also
-    --------
-    Concrete models:
-
-    - [`GLM`](../glm/#nemos.glm.GLM): A feed-forward GLM implementation.
-    - [`PopulationGLM`](../glm/#nemos.glm.PopulationGLM): A population GLM implementation.
     """
 
     def __init__(
@@ -205,15 +190,6 @@ class BaseRegressor(Base, abc.ABC):
                 raise ValueError(
                     f"Could not convert the regularizer strength: {strength} to a float."
                 )
-            if isinstance(self._regularizer, UnRegularized):
-                warnings.warn(
-                    UserWarning(
-                        "Unused parameter `regularizer_strength` for UnRegularized GLM. "
-                        "The regularizer strength parameter is not required and won't be used when the regularizer "
-                        "is set to UnRegularized."
-                    )
-                )
-
         self._regularizer_strength = strength
 
     @property
@@ -537,7 +513,7 @@ class BaseRegressor(Base, abc.ABC):
             )
 
     @abc.abstractmethod
-    def _predict_and_compute_loss(self, params, X, y):
+    def _predict_and_compute_loss(self, params, X, y, random_key:Optional):
         """Loss function for a given model to be optimized over."""
         pass
 

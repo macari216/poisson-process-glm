@@ -17,7 +17,6 @@ def compute_max_window_size(bounds, spike_times, all_spikes):
     within_windows = idxs_plus - idxs_minus
     return jnp.max(within_windows)
 
-
 @partial(jax.jit, static_argnums=2)
 def slice_array(array, i, window_size):
     return jax.lax.dynamic_slice(array, (0,i - window_size), (2,window_size,))
@@ -49,46 +48,50 @@ def reshape_for_vmap(spikes, n_batches_scan):
 
     return shifted_spikes_array, padding.transpose(1,0)
 
-def precompute_spike_indices(spike_ids, neuron_ids, max_spikes):
-    def one_neuron_indices(target_id):
-        return jnp.nonzero(spike_ids == target_id, size=max_spikes, fill_value=spike_ids.size + 5)[0]
-    #
-    # post_indices = []
-    # for target_id in neuron_ids:
-    #     post_indices.append(jnp.nonzero(spike_ids == target_id, size=max_spikes, fill_value=spike_ids.size + 5)[0])
+def reshape_w(weights, n_basis_funcs):
+    if len(weights.shape) == 1:
+        return weights.reshape(-1, n_basis_funcs, 1)
+    elif len(weights.shape) == 2:
+        n_target_neurons = weights.shape[1]
+        return weights.reshape(-1, n_basis_funcs, n_target_neurons)
+    else:
+        raise ValueError(
+            f"Weights must be either 1d or 2d array, the provided weights have shape {weights.shape}"
+        )
 
-    batch_size = 10
-    post_indices = []
-
-    for i in range(0, len(neuron_ids), batch_size):
-        batch_ids = jnp.arange(i, min(i + batch_size, len(neuron_ids)))
-        batched = jax.vmap(one_neuron_indices)(batch_ids)
-        post_indices.append(batched)
-
-    return jnp.concatenate(post_indices, axis=0)
-
-    # return jnp.stack(post_indices)
-
-def compute_chebyshev(f, approx_interval, power=2, dx=0.01):
-    """jax only implementation"""
-    xx = jnp.arange(approx_interval[0] + dx / 2.0, approx_interval[1], dx)
-    nx = xx.shape[0]
-    xxw = jnp.arange(-1.0 + 1.0 / nx, 1.0, 1.0 / (0.5 * nx))
-    Bx = jnp.zeros([nx, power + 1])
-    for i in range(0, power + 1):
-        Bx = Bx.at[:, i].set(jnp.power(xx, i))
-    errwts_cheby = 1.0 / jnp.sqrt(1 - xxw ** 2)
-    Dx = jnp.diag(errwts_cheby)
-    fx = f(xx)
-    coef_cheby = jnp.linalg.lstsq(Bx.T @ Dx @ Bx, Bx.T @ Dx @ fx, rcond=None)[0]
-    return coef_cheby
+def compute_chebyshev(f, approx_intervals, power=2, nx=1000):
+    """compute chebyshev polynomial coefficients for
+    approximating nonlinearity on an array of given intervals"""
+    def compute_chebyshev_single(start, end):
+        xxw = jnp.arange(-1.0 + 1.0 / nx, 1.0, 1.0 / (0.5 * nx))
+        xx = 0.5 * (end - start) * xxw + 0.5 * (start + end)
+        Bx = jnp.zeros([nx, power + 1])
+        for i in range(0, power + 1):
+            Bx = Bx.at[:, i].set(jnp.power(xx, i))
+        errwts_cheby = 1.0 / jnp.sqrt(1 - xxw ** 2)
+        Dx = jnp.diag(errwts_cheby)
+        fx = f(xx)
+        coef_cheby = jnp.linalg.lstsq(Bx.T @ Dx @ Bx, Bx.T @ Dx @ fx, rcond=None)[0]
+        return coef_cheby.T
+    starts, ends = approx_intervals
+    return jax.vmap(compute_chebyshev_single, in_axes=(0,0), out_axes=1)(jnp.atleast_1d(starts), jnp.atleast_1d(ends))
 
 def quadratic(x, f, interval):
-    coefs = compute_chebyshev(f, interval, power=2, dx=0.01)
+    coefs = compute_chebyshev(f, interval)
     return coefs[0]+coefs[1]*x + coefs[2]*(x**2)
 
 def comb(N, k):
     return jax.lax.exp(gammaln(N + 1) - gammaln(k + 1) - gammaln(N + 1 - k))
+
+def std_laguerre_binom(i, j):
+    binom_l = jnp.where(j <= i, comb(i, j), 0.0)
+    binom_b = jnp.where(j <= i, comb(i, j), 0.0)
+    return binom_l, binom_b
+
+def gen_laguerre_binom(i, j, i_a, j_a, alpha):
+    binom_l = jnp.where(j <= i, comb(i+alpha, i-j), 0.0)
+    binom_b = jnp.where(j_a <= i_a, comb(i_a, j_a), 0.0)
+    return binom_l, binom_b
 
 def jax_pairs(neuron_ids):
     return jnp.array(list(combinations(neuron_ids, 2)))
