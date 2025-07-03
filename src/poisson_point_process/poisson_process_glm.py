@@ -22,17 +22,18 @@ ModelParams = Tuple[jnp.ndarray, jnp.ndarray]
 
 from time import perf_counter
 
+
 class ContinuousMC(BaseRegressor):
 
     def __init__(
-        self,
-        observation_model: obs.MonteCarloApproximation,
-        recording_time,
-        random_key: ArrayLike=jax.random.PRNGKey(0),
-        regularizer: Union[str, Regularizer] = "UnRegularized",
-        regularizer_strength: Optional[float] = None,
-        solver_name: str = None,
-        solver_kwargs: dict = None,
+            self,
+            observation_model: obs.MonteCarloApproximation,
+            recording_time,
+            random_key: ArrayLike = jax.random.PRNGKey(0),
+            regularizer: Union[str, Regularizer] = "UnRegularized",
+            regularizer_strength: Optional[float] = None,
+            solver_name: str = None,
+            solver_kwargs: dict = None,
     ):
         super().__init__(
             regularizer=regularizer,
@@ -52,7 +53,7 @@ class ContinuousMC(BaseRegressor):
 
         self.recording_time = recording_time
         self.observation_model = observation_model
-        self.random_key = random_key
+        self.aux = (random_key, 0.)
 
     @staticmethod
     def _check_params(
@@ -99,12 +100,12 @@ class ContinuousMC(BaseRegressor):
     def _check_input_n_timepoints(
             X: Union[DESIGN_INPUT_TYPE, jnp.ndarray], y: jnp.ndarray
     ):
-        if y[1,-1] > X.shape[1]+1:
+        if y[1, -1] > X.shape[1] + 1:
             raise ValueError(
-                    "The position index in y cannot exceed the number of spikes in X."
-                    f"X has {X.shape[1]} spikes, "
-                    f"the largest index in y is {y.shape[1]}!"
-                )
+                "The position index in y cannot exceed the number of spikes in X."
+                f"X has {X.shape[1]} spikes, "
+                f"the largest index in y is {y.shape[1]}!"
+            )
         pass
 
     @staticmethod
@@ -118,16 +119,21 @@ class ContinuousMC(BaseRegressor):
                 expected_dim=2,
                 err_message="y must be two-dimensional, with shape (2, n_target_spikes).",
             )
-        if y.shape[0] != 2:
+        # if y.shape[0] != 2:
+        #     raise ValueError(
+        #         "y must have shape 2 at dimension 0 corresponding to postsynaptic spike times and indices"
+        #     )
+
+        if y.shape[0] != 3:
             raise ValueError(
-                "y must have shape 2 at dimension 0 corresponding to postsynaptic spike times and indices"
+                "y must have shape 3 at dimension 0 corresponding to postsynaptic spike times, neuron IDs and indices"
             )
         if X is not None:
             validation.check_tree_leaves_dimensionality(
                 X,
                 expected_dim=2,
                 err_message="X must be two-dimensional, with shape "
-                "(2, n_spikes) or pytree of the same shape.",
+                            "(2, n_spikes) or pytree of the same shape.",
             )
         if X.shape[0] != 2:
             raise ValueError(
@@ -177,15 +183,16 @@ class ContinuousMC(BaseRegressor):
             params: Tuple[DESIGN_INPUT_TYPE, jnp.ndarray],
             X: DESIGN_INPUT_TYPE,
             y: jnp.ndarray,
-            random_key: Optional,
+            aux: Optional,
     ) -> Tuple:
         """Loss function for a given model to be optimized over."""
 
-        random_key, subkey = jax.random.split(random_key)
+        new_key, subkey = jax.random.split(aux[0])
+        beta = aux[1]
 
-        neg_ll = self.observation_model._negative_log_likelihood(X, y, params, subkey)
+        neg_ll, new_beta = self.observation_model._negative_log_likelihood(X, y, params, subkey, beta)
 
-        return neg_ll, random_key
+        return neg_ll, (new_key, new_beta)
 
     def get_optimal_solver_params_config(self):
         """Return the functions for computing default step and batch size for the solver."""
@@ -207,23 +214,23 @@ class ContinuousMC(BaseRegressor):
 
         analytical_inv = INVERSE_FUNCS.get(inverse_link_function, None)
 
-        out = analytical_inv(y.shape[1] /  self.recording_time.tot_length())
+        out = analytical_inv(y.shape[1] / self.recording_time.tot_length())
 
-        return jnp.array([out,])
+        return jnp.atleast_1d(out)
 
     def _initialize_parameters(
             self,
             X: DESIGN_INPUT_TYPE,
             y: jnp.ndarray
-    )-> Tuple[Union[dict, jnp.ndarray], jnp.ndarray]:
-        #set initial intercept as the inverse of firing rate
+    ) -> Tuple[Union[dict, jnp.ndarray], jnp.ndarray]:
+        # set initial intercept as the inverse of firing rate
         initial_intercept = self._initialize_intercept_matching_mean_rate(
             self.observation_model.inverse_link_function, y
         )
         # get coef dimensions
         n_neurons = len(jnp.unique(X[1]))
 
-        #initialize parameters
+        # initialize parameters
         init_params = (
             jnp.zeros(n_neurons * self.observation_model.n_basis_funcs),
             initial_intercept,
@@ -251,7 +258,7 @@ class ContinuousMC(BaseRegressor):
 
         return init_params
 
-    def _initialize_data_params(self,X,y):
+    def _initialize_data_params(self, X, y):
         if self.max_window is None:
             self.max_window = int(
                 jnp.maximum(
@@ -271,10 +278,10 @@ class ContinuousMC(BaseRegressor):
         """Initialize the state of the solver for running fit and update."""
         # set data dependent parameters
         self._initialize_data_params(X, y)
-        self.observation_model._initialize_data_params(self.recording_time,self.max_window, X)
+        self.observation_model._initialize_data_params(self.recording_time, self.max_window, X)
         self.observation_model._set_ll_function()
 
-        #add max window padding to X and y
+        # add max window padding to X and y
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
 
         if isinstance(X, FeaturePytree):
@@ -297,16 +304,15 @@ class ContinuousMC(BaseRegressor):
         opt_solver_kwargs = self.optimize_solver_params(data, y)
 
         self.instantiate_solver(solver_kwargs=opt_solver_kwargs)
-
-        opt_state = self._solver_init_state(init_params, self.random_key, data, y,)
+        opt_state = self._solver_init_state(init_params, aux=self.aux, X=data, y=y)
 
         return opt_state
 
     def fit(
-        self,
-        X: Union[DESIGN_INPUT_TYPE, ArrayLike],
-        y: jnp.ndarray,
-        init_params: Optional[Tuple[Union[dict, ArrayLike], ArrayLike]] = None,
+            self,
+            X: Union[DESIGN_INPUT_TYPE, ArrayLike],
+            y: jnp.ndarray,
+            init_params: Optional[Tuple[Union[dict, ArrayLike], ArrayLike]] = None,
     ):
         """Fit the model to neural activity."""
         # set data dependent parameters
@@ -314,7 +320,7 @@ class ContinuousMC(BaseRegressor):
         self.observation_model._initialize_data_params(self.recording_time, self.max_window, X)
         self.observation_model._set_ll_function()
 
-        #add max window padding to X and y
+        # add max window padding to X and y
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
 
         if isinstance(X, FeaturePytree):
@@ -326,10 +332,10 @@ class ContinuousMC(BaseRegressor):
 
         self.initialize_state(X, y, init_params)
 
-        params, state = self._solver_run(init_params, self.random_key, data, y)
+        params, state = self._solver_run(init_params, aux=self.aux, X=data, y=y)
 
         if tree_utils.pytree_map_and_reduce(
-            lambda x: jnp.any(jnp.isnan(x)), any, params
+                lambda x: jnp.any(jnp.isnan(x)), any, params
         ):
             raise ValueError(
                 "Solver returned at least one NaN parameter, so solution is invalid!"
@@ -357,7 +363,7 @@ class ContinuousMC(BaseRegressor):
         # self.observation_model._initialize_data_params(self.recording_time, self.max_window, X)
         # self._set_obs_model()
 
-        #add max window padding to X and y
+        # add max window padding to X and y
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
 
         if isinstance(X, FeaturePytree):
@@ -366,12 +372,12 @@ class ContinuousMC(BaseRegressor):
             data = X
 
         # perform a one-step update
-        opt_step = self._solver_update(params, opt_state, self.random_key, data, y, *args, **kwargs)
+        opt_step = self._solver_update(params, opt_state, aux=self.aux, X=data, y=y, *args, **kwargs)
 
         # store params and state
         self._set_coef_and_intercept(opt_step[0])
         self.solver_state_ = opt_step[1]
-        self.random_key = opt_step[1].aux
+        self.aux = opt_step[1].aux
 
         return opt_step
 
@@ -379,8 +385,8 @@ class ContinuousMC(BaseRegressor):
             self,
             X: Union[DESIGN_INPUT_TYPE, ArrayLike],
             n_batches_scan=1,
-            bin_size: Optional=0.001,
-            time_int: Optional=None,
+            bin_size: Optional = 0.001,
+            time_int: Optional = None,
     ) -> jnp.ndarray:
         """Predict rates based on fit parameters."""
 
@@ -397,23 +403,24 @@ class ContinuousMC(BaseRegressor):
         pass
 
     def simulate(
-        self,
-        random_key: jax.Array,
-        feed_forward_input: DESIGN_INPUT_TYPE,
+            self,
+            random_key: jax.Array,
+            feed_forward_input: DESIGN_INPUT_TYPE,
     ):
         """Simulate neural activity in response to a feed-forward input and recurrent activity."""
         pass
 
+
 class PopulationContinuousMC(ContinuousMC):
     def __init__(
-        self,
-        observation_model: obs.MonteCarloApproximation,
-        recording_time,
-        random_key: ArrayLike=jax.random.PRNGKey(0),
-        regularizer: Union[str, Regularizer] = "UnRegularized",
-        regularizer_strength: Optional[float] = None,
-        solver_name: str = None,
-        solver_kwargs: dict = None,
+            self,
+            observation_model: obs.MonteCarloApproximation,
+            recording_time,
+            random_key: ArrayLike = jax.random.PRNGKey(0),
+            regularizer: Union[str, Regularizer] = "UnRegularized",
+            regularizer_strength: Optional[float] = None,
+            solver_name: str = None,
+            solver_kwargs: dict = None,
     ):
         super().__init__(
             observation_model=observation_model,
@@ -435,7 +442,7 @@ class PopulationContinuousMC(ContinuousMC):
 
         self.recording_time = recording_time
         self.observation_model = observation_model
-        self.random_key = random_key
+        self.aux = (random_key,0.)
 
     @staticmethod
     def _check_params(
@@ -465,17 +472,17 @@ class PopulationContinuousMC(ContinuousMC):
             params[0],
             expected_dim=2,
             err_message="params[0] must be an array or nemos.pytree.FeaturePytree "
-            "with array leafs of shape (n_features, n_neurons).",
+                        "with array leafs of shape (n_features, n_neurons).",
         )
         # check the dimensionality of intercept
         validation.check_tree_leaves_dimensionality(
             params[1],
             expected_dim=1,
             err_message="params[1] must be of shape (n_neurons,) but "
-            f"params[1] has {params[1].ndim} dimensions!",
+                        f"params[1] has {params[1].ndim} dimensions!",
         )
         if tree_utils.pytree_map_and_reduce(
-            lambda x: x.shape[1] != params[1].shape[0], all, params[0]
+                lambda x: x.shape[1] != params[1].shape[0], all, params[0]
         ):
             raise ValueError(
                 "Inconsistent number of neurons. "
@@ -504,7 +511,7 @@ class PopulationContinuousMC(ContinuousMC):
                 X,
                 expected_dim=2,
                 err_message="X must be two-dimensional, with shape "
-                "(2, n_spikes) or pytree of the same shape.",
+                            "(2, n_spikes) or pytree of the same shape.",
             )
         if X.shape[0] != 2:
             raise ValueError(
@@ -531,8 +538,8 @@ class PopulationContinuousMC(ContinuousMC):
             self,
             X: DESIGN_INPUT_TYPE,
             y: jnp.ndarray
-    )-> Tuple[Union[dict, jnp.ndarray], jnp.ndarray]:
-        #set initial intercept as the inverse of firing rate
+    ) -> Tuple[Union[dict, jnp.ndarray], jnp.ndarray]:
+        # set initial intercept as the inverse of firing rate
         initial_intercept = self._initialize_intercept_matching_mean_rate(
             self.observation_model.inverse_link_function, y
         )
@@ -540,7 +547,7 @@ class PopulationContinuousMC(ContinuousMC):
         n_features = len(jnp.unique(X[1])) * self.observation_model.n_basis_funcs
         n_neurons = len(jnp.unique(y[1]))
 
-        #initialize parameters
+        # initialize parameters
         init_params = (
             jnp.zeros((n_features, n_neurons)),
             initial_intercept,
@@ -550,14 +557,14 @@ class PopulationContinuousMC(ContinuousMC):
 
 class ContinuousPA(ContinuousMC):
     def __init__(
-        self,
-        observation_model: obs.PolynomialApproximation,
-        recording_time,
-        approx_interval,
-        regularizer: Union[str, Regularizer] = "UnRegularized",
-        regularizer_strength: Optional[float] = None,
-        solver_name: str = None,
-        solver_kwargs: dict = None,
+            self,
+            observation_model: obs.PolynomialApproximation,
+            recording_time,
+            approx_interval,
+            regularizer: Union[str, Regularizer] = "UnRegularized",
+            regularizer_strength: Optional[float] = None,
+            solver_name: str = None,
+            solver_kwargs: dict = None,
     ):
         super().__init__(
             observation_model=observation_model,
@@ -586,15 +593,15 @@ class ContinuousPA(ContinuousMC):
             self.regularizer_strength = 0
 
     def _predict_and_compute_loss(
-        self,
-        params: Tuple[DESIGN_INPUT_TYPE, jnp.ndarray],
-        X: DESIGN_INPUT_TYPE,
-        y: jnp.ndarray,
-        random_key: Optional=None,
+            self,
+            params: Tuple[DESIGN_INPUT_TYPE, jnp.ndarray],
+            X: DESIGN_INPUT_TYPE,
+            y: jnp.ndarray,
+            aux: Optional = None,
     ) -> jnp.ndarray:
         """Loss function for a given model to be optimized over."""
 
-        neg_ll = self.observation_model._negative_log_likelihood(X, y, params, self.approx_interval)
+        neg_ll = self.observation_model._negative_log_likelihood(X, y, params=params, approx_interval=self.approx_interval)
 
         return neg_ll
 
@@ -637,16 +644,15 @@ class ContinuousPA(ContinuousMC):
 
         self.instantiate_solver(solver_kwargs=opt_solver_kwargs)
 
-        opt_state = self._solver_init_state(init_params, None, data, y)
+        opt_state = self._solver_init_state(init_params, aux=None, X=data, y=y)
 
         return opt_state
 
-
     def fit(
-        self,
-        X: Union[DESIGN_INPUT_TYPE, ArrayLike],
-        y: jnp.ndarray,
-        init_params: Optional[Tuple[Union[dict, ArrayLike], ArrayLike]] = None,
+            self,
+            X: Union[DESIGN_INPUT_TYPE, ArrayLike],
+            y: jnp.ndarray,
+            init_params: Optional[Tuple[Union[dict, ArrayLike], ArrayLike]] = None,
     ):
         """Fit the model to neural activity."""
 
@@ -654,7 +660,7 @@ class ContinuousPA(ContinuousMC):
         self._set_regularizer_strength()
         self.observation_model._initialize_data_params(self.recording_time, self.max_window)
 
-        #add max window padding to X and y
+        # add max window padding to X and y
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
         self.observation_model._check_suff(X)
 
@@ -667,10 +673,10 @@ class ContinuousPA(ContinuousMC):
 
         self.initialize_state(data, y, init_params)
 
-        params, state = self._solver_run(init_params, None, data, y)
+        params, state = self._solver_run(init_params, aux=None, X=data, y=y)
 
         if tree_utils.pytree_map_and_reduce(
-            lambda x: jnp.any(jnp.isnan(x)), any, params
+                lambda x: jnp.any(jnp.isnan(x)), any, params
         ):
             raise ValueError(
                 "Solver returned at least one NaN parameter, so solution is invalid!"
@@ -699,7 +705,7 @@ class ContinuousPA(ContinuousMC):
         self.observation_model._initialize_data_params(self.recording_time, self.max_window)
         self.observation_model._check_suff(X)
 
-        #add max window padding to X and y
+        # add max window padding to X and y
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
 
         if isinstance(X, FeaturePytree):
@@ -708,12 +714,10 @@ class ContinuousPA(ContinuousMC):
             data = X
 
         # perform a one-step update
-        t0 = perf_counter()
-        opt_step = self._solver_update(params, opt_state, None, data, y, *args, **kwargs)
+        opt_step = self._solver_update(params, opt_state, aux=None, X=data, y=y, *args, **kwargs)
 
-        t0 = perf_counter()
         if tree_utils.pytree_map_and_reduce(
-            lambda x: jnp.any(jnp.isnan(x)), any, opt_step[0]
+                lambda x: jnp.any(jnp.isnan(x)), any, opt_step[0]
         ):
             raise ValueError(
                 "Solver returned at least one NaN parameter, so solution is invalid!"
@@ -724,7 +728,6 @@ class ContinuousPA(ContinuousMC):
         # store params and state
         self._set_coef_and_intercept(opt_step[0])
         self.solver_state_ = opt_step[1]
-        # print(f"opt step, {perf_counter() - tt0}")
 
         return opt_step
 
@@ -755,7 +758,7 @@ class ContinuousPA(ContinuousMC):
             self,
             X: Union[DESIGN_INPUT_TYPE, ArrayLike],
             n_batches_scan=1,
-            bin_size: Optional=0.001,
+            bin_size: Optional = 0.001,
             time_int: Optional = None,
     ) -> jnp.ndarray:
         """Predict rates based on fit parameters."""
@@ -780,9 +783,9 @@ class ContinuousPA(ContinuousMC):
         pass
 
     def simulate(
-        self,
-        random_key: jax.Array,
-        feed_forward_input: DESIGN_INPUT_TYPE,
+            self,
+            random_key: jax.Array,
+            feed_forward_input: DESIGN_INPUT_TYPE,
     ):
         """Simulate neural activity in response to a feed-forward input and recurrent activity."""
         pass
@@ -794,20 +797,21 @@ class PopulationContinuousPA(ContinuousPA):
     The approximation interval is passed as a list of two arrays containing lower and upper bounds of the intervals.
     X still has shape (2, S) - spike times and IDs, but y is now (3, S) - spike times, spike ids, and insertion indices
     """
+
     def __init__(
-        self,
-        observation_model: obs.PolynomialApproximation,
-        recording_time,
-        approx_interval,
-        regularizer: Union[str, Regularizer] = "UnRegularized",
-        regularizer_strength: Optional[float] = None,
-        solver_name: str = None,
-        solver_kwargs: dict = None,
+            self,
+            observation_model: obs.PolynomialApproximation,
+            recording_time,
+            approx_interval,
+            regularizer: Union[str, Regularizer] = "UnRegularized",
+            regularizer_strength: Optional[float] = None,
+            solver_name: str = None,
+            solver_kwargs: dict = None,
     ):
         super().__init__(
             observation_model=observation_model,
             recording_time=recording_time,
-            approx_interval = approx_interval,
+            approx_interval=approx_interval,
             regularizer=regularizer,
             regularizer_strength=regularizer_strength,
             solver_name=solver_name,
@@ -854,17 +858,17 @@ class PopulationContinuousPA(ContinuousPA):
             params[0],
             expected_dim=2,
             err_message="params[0] must be an array or nemos.pytree.FeaturePytree "
-            "with array leafs of shape (n_features, n_neurons).",
+                        "with array leafs of shape (n_features, n_neurons).",
         )
         # check the dimensionality of intercept
         validation.check_tree_leaves_dimensionality(
             params[1],
             expected_dim=1,
             err_message="params[1] must be of shape (n_neurons,) but "
-            f"params[1] has {params[1].ndim} dimensions!",
+                        f"params[1] has {params[1].ndim} dimensions!",
         )
         if tree_utils.pytree_map_and_reduce(
-            lambda x: x.shape[1] != params[1].shape[0], all, params[0]
+                lambda x: x.shape[1] != params[1].shape[0], all, params[0]
         ):
             raise ValueError(
                 "Inconsistent number of neurons. "
@@ -893,7 +897,7 @@ class PopulationContinuousPA(ContinuousPA):
                 X,
                 expected_dim=2,
                 err_message="X must be two-dimensional, with shape "
-                "(2, n_spikes) or pytree of the same shape.",
+                            "(2, n_spikes) or pytree of the same shape.",
             )
         if X.shape[0] != 2:
             raise ValueError(
@@ -912,16 +916,16 @@ class PopulationContinuousPA(ContinuousPA):
         }
 
         analytical_inv = INVERSE_FUNCS.get(inverse_link_function, None)
-        out = analytical_inv(y.shape[1] /  self.recording_time.tot_length())
+        _, spikes_per_neuron = jnp.unique(y[1], return_counts=True)
 
-        return jnp.array([out,])
+        return jnp.atleast_1d(analytical_inv(spikes_per_neuron / self.recording_time.tot_length()))
 
     def _initialize_parameters(
             self,
             X: DESIGN_INPUT_TYPE,
             y: jnp.ndarray
-    )-> Tuple[Union[dict, jnp.ndarray], jnp.ndarray]:
-        #set initial intercept as the inverse of firing rate
+    ) -> Tuple[Union[dict, jnp.ndarray], jnp.ndarray]:
+        # set initial intercept as the inverse of firing rate
         initial_intercept = self._initialize_intercept_matching_mean_rate(
             self.observation_model.inverse_link_function, y
         )
@@ -929,7 +933,7 @@ class PopulationContinuousPA(ContinuousPA):
         n_features = len(jnp.unique(X[1])) * self.observation_model.n_basis_funcs
         n_neurons = len(jnp.unique(y[1]))
 
-        #initialize parameters
+        # initialize parameters
         init_params = (
             jnp.zeros((n_features, n_neurons)),
             initial_intercept,

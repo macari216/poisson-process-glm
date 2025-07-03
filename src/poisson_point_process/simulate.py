@@ -5,27 +5,18 @@ import pynapple as nap
 import nemos as nmo
 from scipy.optimize import bisect
 
-def poisson_counts(mean_per_sec, bias_per_sec, binsize, n_bins_tot, n_pres, weights_true, ws, basis, nonlin, seed=216):
-    if mean_per_sec < 0 or bias_per_sec < 0:
-        raise ValueError(
-            "Rate must be non-negative"
-        )
-
+def poisson_counts(mean_per_sec, bias_posts, binsize, n_bins_tot, n_pres, weights_true, ws, basis, nonlin, seed=216):
     n_bins_tot += ws
 
     np.random.seed(seed)
     lam_pres = np.abs(np.random.normal(mean_per_sec, mean_per_sec/10, n_pres))
-    bias_posts = np.log(bias_per_sec) + np.log(binsize)
 
     weights_true = jnp.array(weights_true)
     bias_posts = jnp.array(bias_posts)
 
     rate_per_bin = lam_pres * binsize
     pres_spikes = jnp.array(np.random.poisson(lam=rate_per_bin, size=(n_bins_tot, n_pres)))
-    # uniform spacing
-    # pres_spikes = np.zeros((n_bins_tot, n_pres))
-    # pres_spikes[::5*ws] = np.ones(n_pres)
-    # X = basis.compute_features(jnp.array(pres_spikes))
+
     X = nmo.convolve.create_convolutional_predictor(basis, jnp.array(pres_spikes)).reshape(n_bins_tot, -1)
     X = X[ws:]
     lam_posts = nonlin(np.dot(X, weights_true) + bias_posts)
