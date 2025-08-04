@@ -48,6 +48,16 @@ def reshape_for_vmap(spikes, n_batches_scan):
 
     return shifted_spikes_array, padding.transpose(1,0)
 
+def concat_params(params):
+    if len(params[0].shape) == 1:
+        return jnp.vstack((params[0][:,None], params[1][:,None]))
+    elif len(params[0].shape) == 2:
+        return jnp.vstack((params[0], params[1]))
+    else:
+        raise ValueError(
+            f"Weights must be either 1d or 2d array, the provided weights have shape {params[0].shape}"
+        )
+
 def reshape_w(weights, n_basis_funcs):
     if len(weights.shape) == 1:
         return weights.reshape(-1, n_basis_funcs, 1)

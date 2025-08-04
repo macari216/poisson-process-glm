@@ -18,9 +18,9 @@ class MonteCarloApproximation(Observations):
             n_batches_scan,
             history_window,
             eval_function,
+            mc_n_samples=None,
             control_var=False,
             int_function=None,
-            mc_n_samples=None,
             inverse_link_function=jnp.exp,
     ):
         super().__init__(inverse_link_function=inverse_link_function)
@@ -95,6 +95,7 @@ class MonteCarloApproximation(Observations):
             self,
             X: DESIGN_INPUT_TYPE,
             y: jnp.array,
+            M,
             params: Tuple[jnp.array, jnp.array],
             beta_old: float,
     ):
@@ -109,8 +110,8 @@ class MonteCarloApproximation(Observations):
             )
             dts = spk_in_window[0] - i[0]
             lam_tilde = self.compute_lam_tilde(dts, weights[spk_in_window[1].astype(int)], bias)
-            # lam_tilde_s += lam_tilde
-            lam_tilde_s += self.taylor_approx(lam_tilde, bias)
+            lam_tilde_s += lam_tilde
+            # lam_tilde_s += self.taylor_approx(lam_tilde, bias)
             lam_s += self.inverse_link_function(lam_tilde)
             return (lam_s, lam_tilde_s), lam_tilde
 
@@ -124,12 +125,12 @@ class MonteCarloApproximation(Observations):
         sub, _ = scan_vmap(padding[None, :])
         lam_tilde_v = jnp.concatenate(lam_tilde_v, axis=0)[:y.shape[1]]
         lam_v = self.inverse_link_function(lam_tilde_v)
-        lam_tilde_v = self.taylor_approx(lam_tilde_v, bias)
-        I_hat = (self.T / self.M) * (jnp.sum(out[0], axis=0) - jnp.sum(sub[0], axis=0))
-        U_hat = (self.T / self.M) * (jnp.sum(out[1], axis=0) - jnp.sum(sub[1], axis=0))
+        # lam_tilde_v = self.taylor_approx(lam_tilde_v, bias)
+        I_hat = (self.T / M) * (jnp.sum(out[0], axis=0) - jnp.sum(sub[0], axis=0))
+        U_hat = (self.T / M) * (jnp.sum(out[1], axis=0) - jnp.sum(sub[1], axis=0))
         w = jnp.vstack((weights.reshape(-1, n_target), bias))
-        # U = jnp.dot(self.Cj, w)
-        U = self.taylor_approx(jnp.dot(self.Cj, w), bias, self.T)
+        U = jnp.dot(self.Cj, w)
+        # U = self.taylor_approx(jnp.dot(self.Cj, w), bias, self.T)
 
         cov = jnp.sum((lam_v - jnp.mean(lam_v, axis=0)) * (lam_tilde_v - jnp.mean(lam_tilde_v, axis=0)), axis=0)
         var_lam_tilde = jnp.clip(jnp.sum((lam_tilde_v - jnp.mean(lam_tilde_v, axis=0)) ** 2, axis=0), min=jnp.finfo(lam_tilde_v.dtype).eps)
@@ -143,13 +144,14 @@ class MonteCarloApproximation(Observations):
         beta = beta_new
 
         # jax.debug.print("cov {}, var {}", cov, var_lam_tilde)
-        # jax.debug.print("beta {}", self.beta)
+        # jax.debug.print("corr {}", corr)
         return jnp.sum(I_hat + beta * (U_hat - U)), beta
 
     def compute_MC_est(
             self,
             X: DESIGN_INPUT_TYPE,
             y: jnp.array,
+            M,
             params: Tuple[jnp.array, jnp.array],
             beta_old: float,
     ):
@@ -171,7 +173,7 @@ class MonteCarloApproximation(Observations):
         shifted_spikes_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
         out, _ = scan_vmap(shifted_spikes_array)
         sub, _ = scan_vmap(padding[None, :])
-        return (self.T / self.M) * (jnp.sum(out) - jnp.sum(sub)), beta_old
+        return (self.T / M) * (jnp.sum(out) - jnp.sum(sub)), beta_old
 
     def compute_summed_ll(
             self,
@@ -254,6 +256,7 @@ class MonteCarloApproximation(Observations):
         mc_estimate, beta_new = self.ll_function_MC(
             X,
             mc_samples,
+            self.M,
             params,
             beta,
         )
@@ -541,13 +544,7 @@ class PolynomialApproximation(MonteCarloApproximation):
         X = jnp.vstack((X, jnp.arange(X.shape[1])))
         M_full = self.compute_M_full(X)
 
-        def insert_block(matrix, idx, block):
-            return jax.lax.dynamic_update_slice(matrix, block, idx)
-
-        diag_starts = (neuron_ids * self.n_basis_funcs).astype(int)
-        diag = jax.vmap(insert_block, in_axes=(None, 0, 0))(jnp.zeros_like(M_full), (diag_starts, diag_starts),
-                                                            self_products).sum(0)
-        M_full += diag
+        M_full = self.scatter_block_add(M_full, self_products, neuron_ids.astype(int), neuron_ids.astype(int))
 
         return M_full
 
@@ -562,7 +559,7 @@ class PolynomialApproximation(MonteCarloApproximation):
         Returns:
             list of sufficient statistics
         """
-        neuron_ids, spikes_n = jnp.unique(X[1], return_counts=True)
+        neuron_ids, spikes_n = jnp.unique(X[1, self.max_window:], return_counts=True)
 
         m = self.compute_m(spikes_n)
         M = self.compute_M(
@@ -587,10 +584,10 @@ class PolynomialApproximation(MonteCarloApproximation):
         Returns:
            approximate CIF evaluation
         """
-        w = jnp.hstack((params[0], params[1]))
-        coefs = utils.compute_chebyshev(self.inverse_link_function, approx_interval).squeeze()
+        w = utils.concat_params(params)
+        coefs = utils.compute_chebyshev(self.inverse_link_function, approx_interval)
         linear_term = jnp.dot(self.suff[0], w)
-        quadratic_term = jnp.dot(w, jnp.dot(self.suff[1], w))
+        quadratic_term = jnp.einsum('in,ij,jn->n', w, self.suff[1], w)
         return self.T * coefs[0] + coefs[1] * linear_term + coefs[2] * quadratic_term
 
     def compute_event_logl(self, X, y):
@@ -606,44 +603,67 @@ class PolynomialApproximation(MonteCarloApproximation):
         """
         def scan_k(k_sum, i):
             spk_in_window = utils.slice_array(
-                X, i[1].astype(int), self.max_window
+                X, i[-1].astype(int), self.max_window
             )
             dts = spk_in_window[0] - i[0]
             eval = self.eval_function(dts)
 
-            k_sum = k_sum.at[spk_in_window[1].astype(int)].add(eval)
+            k_sum = k_sum.at[spk_in_window[1].astype(int),:,i[1].astype(int)].add(eval)
 
             return k_sum, None
 
-        k_init = jnp.zeros((len(jnp.unique(X[1, self.max_window:])),self.n_basis_funcs))
+        n_target, spikes_n = jnp.unique(y[1, self.max_window:], return_counts=True)
+        n_target = len(n_target)
+        n_neurons = len(jnp.unique(X[1, self.max_window:]))
+        k_init = jnp.zeros((n_neurons, self.n_basis_funcs, n_target))
         # X, y = utils.adjust_indices_and_spike_times(X, self.history_window, self.max_window, y)
         scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_k, k_init, idxs), in_axes=1)
         target_idx_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
         out, _ = scan_vmap(target_idx_array)
         sub, _ = scan_vmap(padding[:, None])
 
-        k = jnp.sum(out, 0).ravel() - jnp.sum(sub, 0).ravel()
+        k = jnp.sum(out, 0).reshape(-1, n_target) - jnp.sum(sub, 0).reshape(-1, n_target)
 
-        return jnp.append(k, jnp.array([y.shape[1]]))
+        return jnp.vstack((k, spikes_n[None, :]))
 
     def _closed_form_solution(
             self,
             X,
             y,
             approx_interval,
-            reg_strength: Optional=0.
+            reg_strength: Optional = 0.,
     ):
         k = self.compute_event_logl(X, y)
 
         if reg_strength is None:
             Cinv = jnp.zeros_like(self.suff[1])
         else:
-            Cinv = reg_strength*jnp.eye(self.suff[1].shape[0])
+            Cinv = reg_strength * jnp.eye(self.suff[1].shape[0])
             Cinv = Cinv.at[-1, -1].set(0.0)
 
-        coefs = utils.compute_chebyshev(self.inverse_link_function, approx_interval).squeeze()
-        b = (k - self.suff[0] * coefs[1])
-        weights_cf = jnp.linalg.solve(2 * coefs[2] * self.suff[1] + Cinv, b)
+        weights_cf_single = lambda a_mat, b_vec: jnp.linalg.solve(a_mat, b_vec)
+
+        @jax.jit
+        def weights_cf_batch(ab, bb):
+            return jax.vmap(weights_cf_single, in_axes=(2, 1), out_axes=1)(ab, bb)
+
+        coefs = utils.compute_chebyshev(self.inverse_link_function, approx_interval)
+        if coefs.shape[1] > 300:
+            batch_size = 300
+            # n_batches = int(jnp.ceil(b.shape[1] / batch_size))
+            results = []
+            for start in range(0, coefs.shape[1], batch_size):
+                end = min(start + batch_size, coefs.shape[1])
+                ab = 2 * coefs[2, start:end][None, None, :] * self.suff[1][:, :, None] + Cinv[:, :, None]
+                bb = (k[:, start:end] - self.suff[0][:, None] * coefs[1, start:end][None, :])
+                res = weights_cf_batch(ab, bb)
+                results.append(res)
+            weights_cf = jnp.concatenate(results, axis=1)
+
+        else:
+            a = 2 * coefs[2][None, None, :] * self.suff[1][:, :, None] + Cinv[:, :, None]
+            b = (k - self.suff[0][:, None] * coefs[1][None, :])
+            weights_cf = jax.vmap(weights_cf_single, in_axes=(2, 1), out_axes=1)(a, b)
 
         return (weights_cf[:-1], weights_cf[-1])
 
@@ -691,7 +711,28 @@ class PolynomialApproximation(MonteCarloApproximation):
         :
             The log-likehood. Shape (1,).
         """
-        nll = self._negative_log_likelihood(X, y, params, approx_interval)
+
+        log_lam_y = self.compute_summed_ll(
+            X,
+            y,
+            params,
+            log=True
+        )
+
+        true_inv_link = self.inverse_link_function
+        self.inverse_link_function = lambda x: jax.nn.relu(utils.quadratic(x, true_inv_link, approx_interval)).squeeze()
+        mc_samples = self.draw_mc_sample(X, M=int(3e6), random_key=jax.random.PRNGKey(0))
+        mc_estimate, _ = self.compute_MC_est(
+            X,
+            mc_samples,
+            M=int(3e6),
+            params=params,
+            beta_old=0,
+        )
+
+        nll = mc_estimate - log_lam_y
+
+        self.inverse_link_function = true_inv_link
         return -nll
 
     def _predict(
@@ -730,10 +771,9 @@ class PolynomialApproximation(MonteCarloApproximation):
         _, out = scan_vmap(bin_array)
         return out.reshape(-1, n_target).squeeze()[:bin_times.size]
 
-
-class PopulationPolynomialApproximation(PolynomialApproximation):
+class HybridApproximation(PolynomialApproximation):
     """
-    The implementation of PA-c model to fit multiple postsynaptic neurons.
+    The implementation of a hybrid model with PA initialization and 2nd order Taylor expansion control variates
     """
     def __init__(
             self,
@@ -743,6 +783,7 @@ class PopulationPolynomialApproximation(PolynomialApproximation):
             eval_function,
             int_function,
             prod_int_function,
+            mc_n_samples=None,
             inverse_link_function=jnp.exp,
     ):
         super().__init__(
@@ -750,11 +791,13 @@ class PopulationPolynomialApproximation(PolynomialApproximation):
             n_basis_funcs = n_basis_funcs,
             n_batches_scan = n_batches_scan,
             history_window = history_window,
+            # mc_n_samples=mc_n_samples,
             eval_function = eval_function,
             int_function=int_function,
             prod_int_function=prod_int_function,
         )
         self.scale = 1.0
+        self.mode="mc"
         self.T = None
         self.recording_time = None
         self.max_window = None
@@ -766,76 +809,137 @@ class PopulationPolynomialApproximation(PolynomialApproximation):
         self.eval_function = eval_function
         self.prod_int_function = prod_int_function
         self.int_function = int_function
+        self.M = mc_n_samples
 
-    def integral_approximation(self, params, approx_interval):
-        w = jnp.vstack((params[0], params[1]))
-        coefs = utils.compute_chebyshev(self.inverse_link_function, approx_interval)
-        linear_term = jnp.dot(self.suff[0], w)
-        quadratic_term = jnp.einsum('in,ij,jn->n', w, self.suff[1], w)
-        return self.T * coefs[0] + coefs[1] * linear_term + coefs[2] * quadratic_term
+    def set_mode(self, mode: str):
+        assert mode in ("mc", "pa")
+        self.mode = mode
 
-    def compute_event_logl(self, X, y):
-        def scan_k(k_sum, i):
+    @partial(jax.jit, static_argnames="self")
+    def taylor_approx(self, x, x2, b, t=1):
+        APPROX_FUNCS = {
+            jnp.exp: lambda x, x2, b, t: jnp.exp(b) * (t + x + 1/2*x2),
+            jax.nn.softplus: lambda x, x2, b, t: (t*jax.nn.softplus(b)
+                                                  + jax.nn.sigmoid(b)*x
+                                                  + 1/2*jax.nn.sigmoid(b)*(1-jax.nn.sigmoid(b))*x2),
+        }
+
+        approx_func = APPROX_FUNCS.get(self.inverse_link_function, None)
+        # approx_func = lambda x, b, y: x
+        return approx_func(x, x2, b, t)
+
+    @partial(jax.jit, static_argnames=("self",))
+    def compute_lam_tilde(self, dts, weights, bias):
+        fx = self.eval_function(dts)
+        return jnp.sum(fx[:, :, None] * weights, axis=(0, 1))
+
+    def compute_control_variate_MC_est(
+            self,
+            X: DESIGN_INPUT_TYPE,
+            y: jnp.array,
+            M,
+            params: Tuple[jnp.array, jnp.array],
+            beta_old: float,
+    ):
+        weights, bias = params
+        weights = utils.reshape_w(weights, self.n_basis_funcs)
+        n_target = weights.shape[-1]
+
+        def scan_fn(carry, i):
+            lam_s, lam_tilde_s = carry
             spk_in_window = utils.slice_array(
                 X, i[-1].astype(int), self.max_window
             )
             dts = spk_in_window[0] - i[0]
-            eval = self.eval_function(dts)
+            lam_tilde = self.compute_lam_tilde(dts, weights[spk_in_window[1].astype(int)], bias)
+            lam_tilde_s += self.taylor_approx(lam_tilde, lam_tilde**2, bias)
+            lam_s += self.inverse_link_function(lam_tilde+bias)
+            return (lam_s, lam_tilde_s), lam_tilde
 
-            k_sum = k_sum.at[spk_in_window[1].astype(int),:,i[1].astype(int)].add(eval)
+        scan_vmap = jax.vmap(
+            lambda idxs: jax.lax.scan(scan_fn, (jnp.zeros(n_target), jnp.zeros(n_target)), idxs),
+            in_axes=1
+        )
 
-            return k_sum, None
+        shifted_spikes_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
+        out, lam_tilde_v = scan_vmap(shifted_spikes_array)
+        sub, _ = scan_vmap(padding[None, :])
+        lam_tilde_v = jnp.concatenate(lam_tilde_v, axis=0)[:y.shape[1]]
+        lam_v = self.inverse_link_function(lam_tilde_v+bias)
+        lam_tilde_v = self.taylor_approx(lam_tilde_v, lam_tilde_v**2, bias)
+        I_hat = (self.T / M) * out[0].sum(0) - sub[0].sum(0)
+        U_hat = (self.T / M) * out[1].sum(0) - sub[1].sum(0)
+        w = utils.concat_params(params)[:-1]
+        U = self.taylor_approx(jnp.dot(self.suff[0], w), jnp.einsum('in,ij,jn->n', w, self.suff[1], w), bias, self.T)
 
-        n_target, spikes_n = jnp.unique(y[1, self.max_window:], return_counts=True)
-        n_target = len(n_target)
-        n_neurons = len(jnp.unique(X[1, self.max_window:]))
-        k_init = jnp.zeros((n_neurons, self.n_basis_funcs, n_target))
-        # X, y = utils.adjust_indices_and_spike_times(X, self.history_window, self.max_window, y)
-        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_k, k_init, idxs), in_axes=1)
-        target_idx_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
-        out, _ = scan_vmap(target_idx_array)
-        sub, _ = scan_vmap(padding[:, None])
+        cov = jnp.sum((lam_v - jnp.mean(lam_v, axis=0)) * (lam_tilde_v - jnp.mean(lam_tilde_v, axis=0)), axis=0)
+        var_lam_tilde = jnp.clip(jnp.sum((lam_tilde_v - jnp.mean(lam_tilde_v, axis=0)) ** 2, axis=0), min=jnp.finfo(lam_tilde_v.dtype).eps)
+        # var_lam = jnp.clip(jnp.sum((lam_v - jnp.mean(lam_v, axis=0)) ** 2, axis=0), min=jnp.finfo(lam_v.dtype).eps)
+        # corr = cov/(jnp.sqrt(var_lam)*jnp.sqrt(var_lam_tilde))
 
-        k = jnp.sum(out, 0).reshape(-1, n_target) - jnp.sum(sub, 0).reshape(-1, n_target)
+        beta_new = -1 * cov/var_lam_tilde
 
-        return jnp.vstack((k, spikes_n[None, :]))
+        # EMA
+        # beta = 0.995 * beta_old + (1 - 0.995) * beta_new
+        beta = beta_new
 
-    def _closed_form_solution(
+        # jax.debug.print("cov {}, var {}", cov, var_lam_tilde)
+        # jax.debug.print("corr {}", corr)
+        return jnp.sum(I_hat + beta * (U_hat - U)), beta
+
+    def _negative_log_likelihood(
             self,
             X,
             y,
-            approx_interval,
-            reg_strength: Optional = 0.,
+            params: Optional = None,
+            random_key: Optional = None,
+            beta: Optional = None,
+            approx_interval: Optional = None,
+
     ):
-        k = self.compute_event_logl(X, y)
+        r"""
+        computes Poisson point process negative log-likelihood with MC estimate of the CIF
 
-        if reg_strength is None:
-            Cinv = jnp.zeros_like(self.suff[1])
-        else:
-            Cinv = reg_strength * jnp.eye(self.suff[1].shape[0])
-            Cinv = Cinv.at[-1, -1].set(0.0)
+        $\sum_{k=1}^K \log \lambda(y_k) - \frac{T}{M} \sum_{m=1}^M \lambda(\tau_m)$
 
-        weights_cf_single = lambda a_mat, b_vec: jnp.linalg.solve(a_mat, b_vec)
-        @jax.jit
-        def weights_cf_batch(ab, bb):
-            return jax.vmap(weights_cf_single, in_axes=(2, 1), out_axes=1)(ab, bb)
+        Parameters:
+            X: (2, S) the spike time data
+            y: (2, S) postsynaptic spike times and insertion indices
+            params: current model parameters
+            random_key: JAX random key for drawing MC samples
+        Returns:
+            negative log-likelihood, shape (1,)
+        """
+        log_lam_y = self.compute_summed_ll(
+            X,
+            y,
+            params,
+            log=True
+        )
 
-        coefs = utils.compute_chebyshev(self.inverse_link_function, approx_interval)
-        if coefs.shape[1] > 300:
-            batch_size = 300
-            # n_batches = int(jnp.ceil(b.shape[1] / batch_size))
-            results = []
-            for start in range(0, coefs.shape[1], batch_size):
-                end = min(start + batch_size, coefs.shape[1])
-                ab = 2 * coefs[2, start:end][None, None, :] * self.suff[1][:, :, None] + Cinv[:, :, None]
-                bb = (k[:,start:end]- self.suff[0][:, None] * coefs[1, start:end][None, :])
-                res = weights_cf_batch(ab, bb)
-                results.append(res)
-            weights_cf = jnp.concatenate(results, axis=1)
+        if self.mode=="mc":
+            mc_samples = self.draw_mc_sample(X, self.M, random_key)
+            mc_estimate, beta_new = self.compute_control_variate_MC_est(
+                X,
+                mc_samples,
+                self.M,
+                params,
+                beta,
+            )
+            return mc_estimate - log_lam_y, beta_new
+        elif self.mode=="pa":
+            estimated_rate = self.integral_approximation(params, approx_interval)
+            return jnp.sum(estimated_rate) - log_lam_y
 
-        else:
-            a = 2 * coefs[2][None, None, :] * self.suff[1][:, :, None] + Cinv[:, :, None]
-            b = (k - self.suff[0][:, None] * coefs[1][None, :])
-            weights_cf = jax.vmap(weights_cf_single, in_axes=(2, 1), out_axes=1)(a, b)
-
-        return (weights_cf[:-1], weights_cf[-1])
+    def _predict(
+            self,
+            X: Union[DESIGN_INPUT_TYPE, ArrayLike],
+            params: Tuple[jnp.array, jnp.array],
+            approx_interval: Optional = None,
+            bin_size: Optional = 0.001,
+            time_int: Optional = None,
+            n_batches_scan=1,
+    ) -> jnp.ndarray:
+        """Predict rates based on fit parameters."""
+        self.set_mode("mc")
+        return MonteCarloApproximation._predict(self, X, params, bin_size, time_int, n_batches_scan)
