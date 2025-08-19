@@ -6,6 +6,7 @@ from typing import Any, Callable, NamedTuple, Optional, Tuple, Union
 from numpy.typing import ArrayLike
 
 from functools import partial
+from contextlib import contextmanager
 
 import jax
 import jax.numpy as jnp
@@ -991,34 +992,6 @@ class ContinuousHybrid(ContinuousPA):
         if self.regularizer_strength is None:
             self.regularizer_strength = 0
 
-    def init_params_and_suff(self, X, y):
-        """ Compute sufficient statistics and fit PA model to get initial parameter estimates"""
-
-        self.observation_model._check_suff(X)
-
-        # INVERSE_FUNCS = {
-        #     jnp.exp: partial(ContinuousPA.fit_closed_form, self),
-        #     jax.nn.softplus: partial(ContinuousPA.fit, self),
-        # }
-
-        INVERSE_FUNCS = {
-            jnp.exp: self.fit_closed_form,
-            jax.nn.softplus: self.fit_pa,
-        }
-
-        if self.init_params_ is None:
-            # print(self.observation_model.__class__)
-            # print(self.observation_model._negative_log_likelihood.__func__.__qualname__)
-
-            # self.solver_kwargs["has_aux"]=False
-            fit_func = INVERSE_FUNCS.get(self.observation_model.inverse_link_function, None)
-            fit_func(X, y)
-            self.init_params_ = (self.coef_, self.intercept_)
-            self.solver_kwargs["has_aux"] = True
-
-            self.observation_model.suff[0] = self.observation_model.suff[0][:-1]
-            self.observation_model.suff[1] = self.observation_model.suff[1][:-1, :-1]
-
     def fit_pa(
             self,
             X: Union[DESIGN_INPUT_TYPE, ArrayLike],
@@ -1038,7 +1011,6 @@ class ContinuousHybrid(ContinuousPA):
         else:
             data = X
 
-        print(X.shape, y.shape)
         init_params = self.initialize_params(data, y, init_params=init_params)
 
         ContinuousPA.initialize_state(self, data, y, init_params)
@@ -1061,6 +1033,35 @@ class ContinuousHybrid(ContinuousPA):
         self._predict_and_compute_loss = original_loss
 
         return self
+
+    def init_params_and_suff(self, X, y):
+        """ Compute sufficient statistics and fit PA model to get initial parameter estimates"""
+
+        self.observation_model._check_suff(X)
+
+        # INVERSE_FUNCS = {
+        #     jnp.exp: partial(ContinuousPA.fit_closed_form, self),
+        #     jax.nn.softplus: partial(ContinuousPA.fit, self),
+        # }
+
+        INVERSE_FUNCS = {
+            jnp.exp: self.fit_closed_form,
+            jax.nn.softplus: self.fit_pa,
+        }
+
+        if self.init_params_ is None:
+            # print(self.observation_model.__class__)
+            # print(self.observation_model._negative_log_likelihood.__func__.__qualname__)
+
+            # self.solver_kwargs["has_aux"]=False
+            fit_func = INVERSE_FUNCS.get(self.observation_model.inverse_link_function, None)
+            print(fit_func)
+            fit_func(X, y)
+            self.init_params_ = (self.coef_, self.intercept_)
+            self.solver_kwargs["has_aux"] = True
+
+            self.observation_model.suff[0] = self.observation_model.suff[0][:-1]
+            self.observation_model.suff[1] = self.observation_model.suff[1][:-1, :-1]
 
     def _predict_and_compute_loss(
             self,
@@ -1089,13 +1090,12 @@ class ContinuousHybrid(ContinuousPA):
         self._initialize_data_params(X, y)
         self._set_regularizer_strength()
         self.observation_model._initialize_data_params(self.recording_time, self.max_window)
+        X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
 
         # fit PA model
         self.init_params_and_suff(X, y)
-        # print(self.init_params_)
 
         # add max window padding to X and y
-        X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
 
         if isinstance(X, FeaturePytree):
             data = X.data

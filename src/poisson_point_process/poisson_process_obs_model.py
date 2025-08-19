@@ -11,6 +11,8 @@ from nemos.typing import DESIGN_INPUT_TYPE
 
 from . import utils
 
+from time import perf_counter
+
 class MonteCarloApproximation(Observations):
     def __init__(
             self,
@@ -117,7 +119,7 @@ class MonteCarloApproximation(Observations):
 
         scan_vmap = jax.vmap(
             lambda idxs: jax.lax.scan(scan_fn, (jnp.zeros(n_target), jnp.zeros(n_target)), idxs),
-            in_axes=1
+            in_axes=0
         )
 
         shifted_spikes_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
@@ -137,7 +139,7 @@ class MonteCarloApproximation(Observations):
         # var_lam = jnp.clip(jnp.sum((lam_v - jnp.mean(lam_v, axis=0)) ** 2, axis=0), min=jnp.finfo(lam_v.dtype).eps)
         # corr = cov/(jnp.sqrt(var_lam)*jnp.sqrt(var_lam_tilde))
 
-        beta_new = -1 * cov/var_lam_tilde
+        beta_new = jnp.clip(-1 * cov/var_lam_tilde, -1, 0)
 
         # EMA
         # beta = 0.995 * beta_old + (1 - 0.995) * beta_new
@@ -168,7 +170,7 @@ class MonteCarloApproximation(Observations):
             lam_s += self.inverse_link_function(lam_tilde)
             return lam_s, None
 
-        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.zeros(n_target), idxs), in_axes=1)
+        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.zeros(n_target), idxs), in_axes=0)
 
         shifted_spikes_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
         out, _ = scan_vmap(shifted_spikes_array)
@@ -216,7 +218,7 @@ class MonteCarloApproximation(Observations):
             lam_s += optional_log(self.inverse_link_function(lam_tilde)).sum()
             return lam_s, None
 
-        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.array(0), idxs), in_axes=1)
+        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.array(0), idxs), in_axes=0)
 
         shifted_spikes_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
         out, _ = scan_vmap(shifted_spikes_array)
@@ -261,6 +263,8 @@ class MonteCarloApproximation(Observations):
             beta,
         )
 
+        # jax.debug.print("int {}, log lam {}", mc_estimate, log_lam_y)
+
         return mc_estimate - log_lam_y, beta_new
 
     def _predict(
@@ -281,7 +285,7 @@ class MonteCarloApproximation(Observations):
             pred_rate = self.inverse_link_function(self.compute_lam_tilde(dts, weights[spk_in_window[1].astype(int)], bias))
             return None, pred_rate
 
-        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(int_f_scan, None, idxs), in_axes=1, out_axes=1)
+        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(int_f_scan, None, idxs), in_axes=0, out_axes=1)
 
         start, end = time_int
         duration = end - start
@@ -410,6 +414,7 @@ class PolynomialApproximation(MonteCarloApproximation):
             self,
             n_basis_funcs,
             n_batches_scan,
+            n_batches_pa,
             history_window,
             eval_function,
             int_function,
@@ -430,6 +435,7 @@ class PolynomialApproximation(MonteCarloApproximation):
 
         self.n_basis_funcs = n_basis_funcs
         self.n_batches_scan = n_batches_scan
+        self.n_batches_pa = n_batches_pa
         self.history_window = history_window
         self.eval_function = eval_function
         self.prod_int_function = prod_int_function
@@ -488,6 +494,30 @@ class PolynomialApproximation(MonteCarloApproximation):
         )
         return jax.lax.scatter_add(operand, scatter_indices, scatter_updates, dnums)
 
+    def scatter_vector_add(self,
+                          k_sum: jnp.ndarray,
+                          updates: jnp.ndarray,
+                          pre_idx: jnp.ndarray,
+                          post_idx: jnp.ndarray
+                          ) -> jnp.ndarray:
+        """
+        Adds each updates[k] to k_sum[pre_idx[k], :, post_idx[k]].
+        """
+        K, J = updates.shape
+        j_idx = jnp.arange(J)
+        j_idx = jnp.tile(j_idx[None, :], (K, 1))
+        pre = jnp.repeat(pre_idx[:, None], J, axis=1)
+        post = jnp.repeat(post_idx[:, None], J, axis=1)
+        scatter_indices = jnp.stack([pre, j_idx, post], axis=-1)
+        scatter_indices = scatter_indices.reshape(-1, 3)
+        scatter_updates = updates.reshape(-1)
+        dnums = jax.lax.ScatterDimensionNumbers(
+            update_window_dims=(),
+            inserted_window_dims=(0, 1, 2),
+            scatter_dims_to_operand_dims=(0, 1, 2)
+        )
+        return jax.lax.scatter_add(k_sum, scatter_indices, scatter_updates, dnums)
+
     def compute_M_full(self, X):
         """
         computes the full (NJ,NJ) interaction matrix by running one pass over the entire dataset
@@ -504,15 +534,19 @@ class PolynomialApproximation(MonteCarloApproximation):
             )
             dts = spk_in_window[0] - idx[0]
             cross_prod_sums = self.prod_int_function(dts)
-            # M_scan = M_scan.at[spk_in_window[2].astype(int)*n_basis_funcs, idx[2].astype(int)*n_basis_funcs].add(cross_prod_sums)
-            M_scan = self.scatter_block_add(M_scan, cross_prod_sums, spk_in_window[1].astype(int), jnp.tile(idx[1].astype(int), self.max_window))
-            M_scan = self.scatter_block_add(M_scan, cross_prod_sums.transpose(0,2,1), jnp.tile(idx[1].astype(int), self.max_window), spk_in_window[1].astype(int))
+
+            M_scan = self.scatter_block_add(
+                M_scan,
+                jnp.concatenate((cross_prod_sums, cross_prod_sums.transpose(0,2,1)), axis=0),
+                jnp.concatenate((spk_in_window[1].astype(int), jnp.tile(idx[1].astype(int), self.max_window)), axis=0),
+                jnp.concatenate((jnp.tile(idx[1].astype(int), self.max_window), spk_in_window[1].astype(int)), axis=0)
+            )
             return M_scan, None
         scan_vmap = jax.vmap(
             lambda idxs: jax.lax.scan(scan_fn, jnp.zeros((n_features, n_features)), idxs),
-            in_axes=1
+            in_axes=0
         )
-        post_idx_array, padding = utils.reshape_for_vmap(X[:, self.max_window:], self.n_batches_scan)
+        post_idx_array, padding = utils.reshape_for_vmap(X[:, self.max_window:], self.n_batches_pa)
         out, _ = scan_vmap(post_idx_array)
         sub, _ = scan_vmap(padding[None, :])
         M_int = jnp.sum(out, 0) - jnp.sum(sub, 0)
@@ -562,11 +596,13 @@ class PolynomialApproximation(MonteCarloApproximation):
         neuron_ids, spikes_n = jnp.unique(X[1, self.max_window:], return_counts=True)
 
         m = self.compute_m(spikes_n)
+        # tt0 = perf_counter()
         M = self.compute_M(
             X,
             spikes_n,
             neuron_ids
         )
+        # print(perf_counter()-tt0)
 
         m = jnp.append(m, jnp.array([self.T]))
         M = jnp.hstack([M, m[:-1, None]])
@@ -608,7 +644,7 @@ class PolynomialApproximation(MonteCarloApproximation):
             dts = spk_in_window[0] - i[0]
             eval = self.eval_function(dts)
 
-            k_sum = k_sum.at[spk_in_window[1].astype(int),:,i[1].astype(int)].add(eval)
+            k_sum = self.scatter_vector_add(k_sum, eval, spk_in_window[1].astype(int), jnp.tile(i[1].astype(int), self.max_window))
 
             return k_sum, None
 
@@ -616,8 +652,8 @@ class PolynomialApproximation(MonteCarloApproximation):
         n_target = len(n_target)
         n_neurons = len(jnp.unique(X[1, self.max_window:]))
         k_init = jnp.zeros((n_neurons, self.n_basis_funcs, n_target))
-        # X, y = utils.adjust_indices_and_spike_times(X, self.history_window, self.max_window, y)
-        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_k, k_init, idxs), in_axes=1)
+
+        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_k, k_init, idxs), in_axes=0)
         target_idx_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
         out, _ = scan_vmap(target_idx_array)
         sub, _ = scan_vmap(padding[:, None])
@@ -633,7 +669,9 @@ class PolynomialApproximation(MonteCarloApproximation):
             approx_interval,
             reg_strength: Optional = 0.,
     ):
-        k = self.compute_event_logl(X, y)
+        if len(self.suff) == 2:
+            k = self.compute_event_logl(X, y)
+            self.suff.append(k)
 
         if reg_strength is None:
             Cinv = jnp.zeros_like(self.suff[1])
@@ -655,14 +693,14 @@ class PolynomialApproximation(MonteCarloApproximation):
             for start in range(0, coefs.shape[1], batch_size):
                 end = min(start + batch_size, coefs.shape[1])
                 ab = 2 * coefs[2, start:end][None, None, :] * self.suff[1][:, :, None] + Cinv[:, :, None]
-                bb = (k[:, start:end] - self.suff[0][:, None] * coefs[1, start:end][None, :])
+                bb = (self.suff[2][:, start:end] - self.suff[0][:, None] * coefs[1, start:end][None, :])
                 res = weights_cf_batch(ab, bb)
                 results.append(res)
             weights_cf = jnp.concatenate(results, axis=1)
 
         else:
             a = 2 * coefs[2][None, None, :] * self.suff[1][:, :, None] + Cinv[:, :, None]
-            b = (k - self.suff[0][:, None] * coefs[1][None, :])
+            b = (self.suff[2] - self.suff[0][:, None] * coefs[1][None, :])
             weights_cf = jax.vmap(weights_cf_single, in_axes=(2, 1), out_axes=1)(a, b)
 
         return (weights_cf[:-1], weights_cf[-1])
@@ -755,7 +793,7 @@ class PolynomialApproximation(MonteCarloApproximation):
             pred_rate = utils.quadratic(dot_prod, self.inverse_link_function, approx_interval)
             return None, pred_rate
 
-        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(int_f_scan, None, idxs), in_axes=1, out_axes=1)
+        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(int_f_scan, None, idxs), in_axes=0, out_axes=1)
 
         start, end = time_int
         duration = end - start
@@ -779,6 +817,7 @@ class HybridApproximation(PolynomialApproximation):
             self,
             n_basis_funcs,
             n_batches_scan,
+            n_batches_pa,
             history_window,
             eval_function,
             int_function,
@@ -790,8 +829,8 @@ class HybridApproximation(PolynomialApproximation):
             inverse_link_function=inverse_link_function,
             n_basis_funcs = n_basis_funcs,
             n_batches_scan = n_batches_scan,
+            n_batches_pa = n_batches_pa,
             history_window = history_window,
-            # mc_n_samples=mc_n_samples,
             eval_function = eval_function,
             int_function=int_function,
             prod_int_function=prod_int_function,
@@ -858,7 +897,7 @@ class HybridApproximation(PolynomialApproximation):
 
         scan_vmap = jax.vmap(
             lambda idxs: jax.lax.scan(scan_fn, (jnp.zeros(n_target), jnp.zeros(n_target)), idxs),
-            in_axes=1
+            in_axes=0
         )
 
         shifted_spikes_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
@@ -877,7 +916,7 @@ class HybridApproximation(PolynomialApproximation):
         # var_lam = jnp.clip(jnp.sum((lam_v - jnp.mean(lam_v, axis=0)) ** 2, axis=0), min=jnp.finfo(lam_v.dtype).eps)
         # corr = cov/(jnp.sqrt(var_lam)*jnp.sqrt(var_lam_tilde))
 
-        beta_new = -1 * cov/var_lam_tilde
+        beta_new = -jnp.clip(1 * cov/var_lam_tilde, -1, 0)
 
         # EMA
         # beta = 0.995 * beta_old + (1 - 0.995) * beta_new

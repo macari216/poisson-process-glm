@@ -103,3 +103,93 @@ def inhomogeneous_process(t_max, b, w, ws, seed=123):
         t0 = spike_times[-1]
     spike_times = np.array(spike_times)
     return spike_times[spike_times < t_max]
+
+def sim_real_jax(sim_time, binsize, n, W, key=jax.random.PRNGKey(0), b=0.011, b_std=0.6, thres=0.03, rise=0.0015,
+                 fall=0.002, cond=1):
+    """
+    Simulate a recurrent conductance-based threshold spiking network with alpha function synapses
+
+    Each neuron:
+    - receives random external input, scaled by gaussian noise and a bernoulli mask
+    - receives recurrent input from other neurons
+    - spikes if input > threshold
+    - opens a synaptic channel for a fixed duration
+    - updates activity with decay, producing an alpha function response.
+
+    Parameters
+    ----------
+    sim_time : float
+        total simulation time (seconds)
+    binsize : float
+        time step size
+    n : int
+        number of neurons
+    W : shape (n, n)
+        recurrent weight matrix
+    key : PRNGKey
+        JAX random key
+    b, b_std, thres, rise, fall, cond : float
+       model parameters controlling external input, synaptic dynamics, and channel conductance
+
+    Returns
+    -------
+    spikes : (t_steps, n)
+        binary spike train
+    act : (t_steps, n)
+        synaptic activity
+    """
+    def scan_fn(carry, t):
+        act, ch_counter, key = carry
+        key, subkey1, subkey2 = jax.random.split(key, 3)
+
+        # input from external and synaptic activity
+        xi = jax.random.normal(subkey1, (n,)) * b_std
+        b_t = (b * (1 + xi)) * jax.random.bernoulli(subkey2, 0.07, (n,))
+        I_t = W @ act.T + b_t
+
+        # spike and open synaptic channel
+        spikes = jnp.where(I_t > thres, 1., 0.)
+        ch_counter = jnp.where(spikes > 0, o, ch_counter)
+        g = jnp.where(ch_counter > 0, cond, 0)
+        ch_counter = jnp.maximum(ch_counter - 1, 0)
+
+        # update activity
+        act_next = act - ((act + g * (act - 1)) * binsize / fall)
+
+        return (act_next, ch_counter, key), (spikes, act_next)
+
+    t_steps = int(sim_time / binsize)
+    o = int(rise / binsize)
+    init_arrays = (jnp.zeros(n, ), jnp.zeros(n, ), key)
+
+    _, (spikes, act) = jax.lax.scan(scan_fn, init_arrays, jnp.arange(t_steps))
+
+    return spikes, act
+
+def sim_real(tot_time, binsize, n, W, thres=0.03, b=0.001, b_std=0.6, rise=0.0015, fall=0.002, cond=1):
+    """
+    NumPy version
+    """
+    t = int(tot_time / binsize)
+    o = int(rise / binsize)  # interval for opening synaptic channels
+    # initialize synaptic activity, spikes, and channel conductance
+    s = np.zeros((t,n))
+    spikes_ring = np.zeros((t, n))
+    ch_counter = np.zeros(n)
+
+    for t in range(t):
+        # external input
+        xi = np.random.normal(0, b_std, n)
+        b_t = (b * (1 + xi)) * np.random.binomial(1, 0.07, n)
+        # summed input from synaptic and external activity
+        I_t = (W @ s[t].T) + b_t
+        thres_mask = I_t > thres
+        spikes_ring[t, thres_mask] = 1
+        # open channels
+        ch_counter = jnp.where(spikes_ring[t] > 0, o, ch_counter)
+        g_t = jnp.where(ch_counter > 0, 1, 0)
+        ch_counter = jnp.maximum(ch_counter - 1, 0)
+        # next step activity
+        s[t + 1] = s[t] - ((s[t] + cond * g_t * (s[t] - 1)) * binsize / fall)
+
+    return spikes_ring, s

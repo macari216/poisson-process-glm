@@ -21,6 +21,10 @@ def compute_max_window_size(bounds, spike_times, all_spikes):
 def slice_array(array, i, window_size):
     return jax.lax.dynamic_slice(array, (0,i - window_size), (2,window_size,))
 
+@partial(jax.jit, static_argnums=2)
+def slice_array_batched(array, i, window_size):
+    return jax.vmap(slice_array, in_axes=(None,0,None))(array, i, window_size)
+
 @partial(jax.jit, static_argnums=(1,2))
 def adjust_indices_and_spike_times(
         X: ArrayLike,
@@ -44,7 +48,7 @@ def reshape_for_vmap(spikes, n_batches_scan):
     shifted_spikes = jnp.hstack(
         (spikes, padding)
     )
-    shifted_spikes_array = shifted_spikes.reshape(spikes.shape[0],n_batches_scan,-1).transpose(1,2,0)
+    shifted_spikes_array = shifted_spikes.reshape(spikes.shape[0],n_batches_scan,-1).transpose(2,1,0)
 
     return shifted_spikes_array, padding.transpose(1,0)
 
