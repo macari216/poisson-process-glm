@@ -52,14 +52,14 @@ posts_rate_hz = 2
 # inverse firing rate per bin
 bias_true = phi_inverse(posts_rate_hz * binsize)
 # generative weights
-weights_true = np.random.normal(0.3, 0.8, n_neurons * n_basis_funcs)
+weights_true = np.random.normal(0.1, 0.5, n_neurons * n_basis_funcs)
 
 # true filters in Hz
 filters_true = phi(np.dot(weights_true.reshape(-1,n_basis_funcs), kernels.T) + bias_true) / binsize
 
 # step 1: simulate counts
 # post- and presynaptic spike counts and postsynaptic firing rates per bin
-_, y_counts, X_counts, lam_posts = simulate.poisson_counts(pres_rate_hz, posts_rate_hz, binsize,
+_, y_counts, X_counts, lam_posts = simulate.poisson_counts(pres_rate_hz, bias_true, binsize,
                                                            n_bins_tot, n_neurons, weights_true, window_size, kernels,
                                                            phi)
 
@@ -70,10 +70,10 @@ spike_times_y, _ = simulate.poisson_times(y_counts[:, None], sim_time, binsize)
 # X_spikes contains all presynaptic spike times and corresponding neuron IDs
 X_spikes = jnp.vstack((spike_times, spike_ids))
 
-# y_spikes contains postsynaptic spike times and their insertion indices into
+# y_spikes contains postsynaptic spike times, ids, and their insertion indices into
 # the presynaptic spike times array, preserving temporal order (required to perform a scan over spikes)
 target_idx = jnp.searchsorted(X_spikes[0], spike_times_y)
-y_spikes = jnp.vstack((spike_times_y, target_idx))
+y_spikes = jnp.vstack((spike_times_y, jnp.zeros(target_idx.size), target_idx))
 
 
 ## fit continuous PA model
@@ -90,6 +90,7 @@ obs_model_pa = PolynomialApproximation(
     inverse_link_function=phi,
     n_basis_funcs=n_basis_funcs,
     n_batches_scan=1,
+    n_batches_pa=1,
     history_window=history_window,
     eval_function=basis_fn,
     int_function = int_fn,
@@ -118,21 +119,17 @@ mse_pa = np.mean((filters_true - filters_pa) ** 2)
 
 ## fit continuous MC model
 print("fitting MC model...")
-# decaying learning rate schedule
-def lr_schedule(step):
-    initial_lr = 8e-4
-    decay_rate = 0.999
-    min_rate = 1e-7
-    return  jnp.clip(initial_lr * decay_rate ** step, min_rate)
 
 # initialize MC observation model (computes nll)
-# draw 1,000,000 MC samples per gradient step
+# draw 500,000 MC samples per gradient step
 obs_model_mc = MonteCarloApproximation(
     n_basis_funcs=n_basis_funcs,
     n_batches_scan=1,
     history_window=history_window,
-    mc_n_samples=int(1e6),
+    mc_n_samples=int(5e5),
     eval_function=basis_fn,
+    int_function=int_fn,
+    control_var=True,
 )
 
 # initialize MC model
@@ -141,13 +138,13 @@ model_mc = ContinuousMC(
     observation_model=obs_model_mc,
     recording_time=nap.IntervalSet(0, sim_time),
     random_key=jax.random.PRNGKey(0),
-    solver_kwargs={"has_aux": True, "acceleration": False, "stepsize": lr_schedule})
+    solver_kwargs={"has_aux": True, "acceleration": False, "stepsize": -1})
 params = model_mc.initialize_params(X_spikes, y_spikes)
 state = model_mc.initialize_state(X_spikes, y_spikes, params)
 
 # fit MC model
 # record gradient step norm
-num_iter = 4000
+num_iter = 500
 tt0 = perf_counter()
 error_mc = np.zeros(num_iter)
 for step in range(num_iter):
@@ -172,13 +169,13 @@ model_h = ContinuousMC(
     observation_model=obs_model_mc,
     recording_time=nap.IntervalSet(0, sim_time),
     random_key=jax.random.PRNGKey(0),
-    solver_kwargs={"has_aux": True, "acceleration": False, "stepsize": lr_schedule})
-pa_params = (model_pa.coef_, jnp.atleast_1d(model_pa.intercept_))
+    solver_kwargs={"has_aux": True, "acceleration": False, "stepsize": -1})
+pa_params = (model_pa.coef_.squeeze(), jnp.atleast_1d(model_pa.intercept_))
 params_h = model_h.initialize_params(X_spikes, y_spikes, init_params=pa_params)
 state_h = model_h.initialize_state(X_spikes, y_spikes, params_h)
 
 # fit hybrid model
-num_iter = 2000
+num_iter = 500
 tt0 = perf_counter()
 error_h = np.zeros(num_iter)
 for step in range(num_iter):
@@ -225,9 +222,10 @@ results = {
     }
 }
 
-save_path = "../_results/pp_glm_results.npz"
-os.makedirs("../_results", exist_ok=True)
-np.savez(save_path, **results)
-print("results saved to _results/pp_glm_results.npz")
+# # uncomment if needed
+# save_path = "../_results/pp_glm_results.npz"
+# os.makedirs("../_results", exist_ok=True)
+# np.savez(save_path, **results)
+# print("results saved to _results/pp_glm_results.npz")
 
 print("script terminated")
