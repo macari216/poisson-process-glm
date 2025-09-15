@@ -16,10 +16,11 @@ import jaxopt
 from numpy.typing import ArrayLike, NDArray
 
 from nemos import solvers, utils, validation
-from nemos._regularizer_builder import AVAILABLE_REGULARIZERS, create_regularizer
 from nemos.base_class import Base
-from .regularizer_PP import Regularizer, UnRegularized
 from nemos.typing import DESIGN_INPUT_TYPE, SolverInit, SolverRun, SolverUpdate
+
+from ._regularizer_builder_PP import AVAILABLE_REGULARIZERS, create_regularizer
+from .regularizer_PP import Regularizer, UnRegularized
 
 class BaseRegressor(Base, abc.ABC):
     """Abstract base class for GLM regression models.
