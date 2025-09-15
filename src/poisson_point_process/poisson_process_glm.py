@@ -14,7 +14,7 @@ import jaxopt
 
 from poisson_point_process import utils
 from poisson_point_process import poisson_process_obs_model as obs
-from poisson_point_process.base_regressor_MC import BaseRegressor
+from poisson_point_process.base_regressor_PP import BaseRegressor
 
 from nemos import tree_utils, validation
 from nemos.pytrees import FeaturePytree

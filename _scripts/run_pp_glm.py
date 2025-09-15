@@ -144,7 +144,7 @@ state = model_mc.initialize_state(X_spikes, y_spikes, params)
 
 # fit MC model
 # record gradient step norm
-num_iter = 500
+num_iter = 10
 tt0 = perf_counter()
 error_mc = np.zeros(num_iter)
 for step in range(num_iter):
@@ -175,7 +175,7 @@ params_h = model_h.initialize_params(X_spikes, y_spikes, init_params=pa_params)
 state_h = model_h.initialize_state(X_spikes, y_spikes, params_h)
 
 # fit hybrid model
-num_iter = 500
+num_iter = 10
 tt0 = perf_counter()
 error_h = np.zeros(num_iter)
 for step in range(num_iter):

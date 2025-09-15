@@ -18,7 +18,7 @@ from numpy.typing import ArrayLike, NDArray
 from nemos import solvers, utils, validation
 from nemos._regularizer_builder import AVAILABLE_REGULARIZERS, create_regularizer
 from nemos.base_class import Base
-from nemos.regularizer import Regularizer, UnRegularized
+from .regularizer_PP import Regularizer, UnRegularized
 from nemos.typing import DESIGN_INPUT_TYPE, SolverInit, SolverRun, SolverUpdate
 
 class BaseRegressor(Base, abc.ABC):
