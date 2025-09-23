@@ -33,6 +33,7 @@ class MonteCarloApproximation(Observations):
         self.max_window = None
         self.ll_function_MC = None
         self.Cj = None
+        self.M_grid = None
 
         self.n_basis_funcs = n_basis_funcs
         self.n_batches_scan = n_batches_scan
@@ -52,6 +53,12 @@ class MonteCarloApproximation(Observations):
         Cj = (spikes_n[:, None] * phi_int).ravel()
         return jnp.append(Cj, jnp.array([self.T]))
 
+    def build_sampling_grid(self):
+        dt = self.T / self.M
+        starts, ends = self.recording_time.start, self.recording_time.end
+        M_sub = jnp.floor((ends - starts) / dt).astype(int) + 1
+        return jnp.concatenate([jnp.linspace(s + dt, e, m) - dt / 2 for s, e, m in zip(starts, ends, M_sub)])
+
     def _initialize_data_params(
             self,
             recording_time,
@@ -63,16 +70,16 @@ class MonteCarloApproximation(Observations):
             self.T = self.recording_time.tot_length()
         if self.max_window is None:
             self.max_window = max_window
+        if self.M_grid is None:
+            self.M_grid = self.build_sampling_grid()
         if (self.Cj is None) and self.control_var:
             self.Cj = self.compute_Cj(X)
 
     def draw_mc_sample(self, X, M, random_key):
         """draw sample for a Monte-Carlo estimate of /int_0^T(lambda(t))dt"""
         dt = self.T/M
-        start, end = self.recording_time.start[0], self.recording_time.end[-1]
-        s_m = jnp.linspace(start+dt, end, M) - dt/2
         epsilon_m = jax.random.uniform(random_key, shape=(M,), minval=0.0, maxval=dt)
-        tau_m = s_m + epsilon_m
+        tau_m = self.M_grid + epsilon_m
         tau_m_idx = jnp.searchsorted(X[0], tau_m)
         mc_spikes = jnp.vstack((tau_m, tau_m_idx))
 
