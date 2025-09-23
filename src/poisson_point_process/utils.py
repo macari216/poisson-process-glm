@@ -6,8 +6,21 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 from jax.scipy.special import gammaln
+from scipy.special import genlaguerre
 from itertools import combinations
+from pynapple import TsGroup
 
+def preprocess_spikes(spikes: TsGroup):
+    spikes_n = jnp.array([spikes[n].shape[0] for n in spikes.index])
+    spike_ids = jnp.repeat(jnp.arange(len(spikes)), spikes_n)
+    spike_times = jnp.concatenate([spikes.data[n].t for n in spikes.index])
+    sorted_indices = jnp.argsort(spike_times)
+    spike_times = spike_times[sorted_indices]
+    spike_ids = spike_ids[sorted_indices]
+    X_spikes = jnp.vstack((spike_times, spike_ids))
+    y_spikes = jnp.vstack((X_spikes, jnp.arange(spike_times.size)))
+
+    return X_spikes, y_spikes
 
 @jax.jit
 def compute_max_window_size(bounds, spike_times, all_spikes):
@@ -40,6 +53,18 @@ def adjust_indices_and_spike_times(
         return shifted_X, shifted_y
     else:
         return shifted_X
+
+def compute_batch(range, n_spikes):
+    best_d = None
+    min_r = float('inf')
+
+    for d in range:
+        r = -n_spikes % d
+        s = (n_spikes + r) / d
+        if r < min_r:
+            min_r = r
+            best_d = d
+    return best_d
 
 @partial(jax.jit, static_argnums=1)
 def reshape_for_vmap(spikes, n_batches_scan):
@@ -109,3 +134,21 @@ def gen_laguerre_binom(i, j, i_a, j_a, alpha):
 
 def jax_pairs(neuron_ids):
     return jnp.array(list(combinations(neuron_ids, 2)))
+
+def max_window_gen_laguerre(n_basis_funcs, c, alpha, decay_threshold=0.01):
+    '''
+    empirically select the evaluation window so that the highest-order basis
+    function decays to 0 at the window edge
+    '''
+    x_test = jnp.linspace(0, 100 / c, 1000)
+    last_n = n_basis_funcs - 1
+    poly_coeffs = genlaguerre(last_n, alpha).coef[::-1]
+    basis_vals = (jnp.exp(-c * x_test / 2) *
+                  jnp.power(c * x_test, alpha / 2) *
+                  jnp.polyval(poly_coeffs[::-1], c * x_test))
+    envelope = jnp.abs(basis_vals)
+    valid_idx = jnp.where(envelope > decay_threshold * jnp.max(envelope))[0]
+    if len(valid_idx) > 0:
+        return x_test[valid_idx[-1]] * 1.1  # small buffer
+    else:
+        return x_test[-1]

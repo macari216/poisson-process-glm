@@ -8,7 +8,7 @@ from scipy.special import laguerre, genlaguerre
 import numpy as np
 from sklearn.decomposition import PCA
 
-from .utils import comb, std_laguerre_binom, gen_laguerre_binom
+from .utils import comb, std_laguerre_binom, gen_laguerre_binom, max_window_gen_laguerre
 
 jax.config.update("jax_enable_x64", True)
 
@@ -155,7 +155,9 @@ def LaguerreEval(ws, n_basis_funcs, c=1.0, max_x=30.):
     eval_func = lambda dts: basis_funcs(dts, ws, P, c, max_x)
     return eval_func
 
-def GenLaguerreEval(ws, n_basis_funcs, c=1.5, alpha=2.0, max_x=30.):
+def GenLaguerreEval(ws, n_basis_funcs, c=1.5, alpha=2.0, max_x=None):
+    if max_x is None:
+        max_x = max_window_gen_laguerre(n_basis_funcs, c, alpha)
     P = np.zeros((n_basis_funcs, n_basis_funcs))
     for n in range(n_basis_funcs):
         P[n, :(n+1)] = genlaguerre(n, alpha).coef[::-1]
