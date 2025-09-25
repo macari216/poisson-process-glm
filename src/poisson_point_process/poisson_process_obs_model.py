@@ -56,7 +56,8 @@ class MonteCarloApproximation(Observations):
     def build_sampling_grid(self):
         dt = self.T / self.M
         starts, ends = self.recording_time.start, self.recording_time.end
-        M_sub = jnp.floor((ends - starts) / dt).astype(int) + 1
+        M_sub = jnp.floor((ends - starts) / dt).astype(int)
+        M_sub = M_sub.at[1].set(M_sub[1] + 1)
         return jnp.concatenate([jnp.linspace(s + dt, e, m) - dt / 2 for s, e, m in zip(starts, ends, M_sub)])
 
     def _initialize_data_params(

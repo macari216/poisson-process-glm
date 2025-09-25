@@ -296,7 +296,7 @@ class Lasso(Regularizer):
         """
 
         def l1_penalty(coeff: jnp.ndarray, intercept: jnp.ndarray) -> jnp.ndarray:
-            return regularizer_strength * jnp.sum(jnp.abs(coeff)) / intercept.shape[0]
+            return  jnp.sum(regularizer_strength * jnp.abs(coeff)) / intercept.shape[0]
 
         # tree map the computation and sum over leaves
         return tree_utils.pytree_map_and_reduce(
