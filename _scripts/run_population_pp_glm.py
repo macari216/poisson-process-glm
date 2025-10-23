@@ -246,7 +246,7 @@ results = {
     }
 }
 
-save_path = "../_results/pp_glm_results.npz"
+save_path = "../_results/population_pp_glm_results.npz"
 os.makedirs("../_results", exist_ok=True)
 np.savez(save_path, **results)
 print("results saved to _results/population_pp_glm_results.npz")
