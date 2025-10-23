@@ -632,7 +632,10 @@ class PolynomialApproximation(MonteCarloApproximation):
         coefs = utils.compute_chebyshev(self.inverse_link_function, approx_interval)
         linear_term = jnp.dot(self.suff[0], w)
         quadratic_term = jnp.einsum('in,ij,jn->n', w, self.suff[1], w)
-        return self.T * coefs[0] + coefs[1] * linear_term + coefs[2] * quadratic_term
+
+        int_approx = self.T * coefs[0] + coefs[1] * linear_term + coefs[2] * quadratic_term
+
+        return jax.nn.relu(int_approx)
 
     def compute_event_logl(self, X, y):
         r"""
