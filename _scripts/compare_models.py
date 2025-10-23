@@ -107,7 +107,7 @@ for k in range(kfold):
 
         X_spikes = jnp.vstack((spike_times, spike_ids))
         target_idx = jnp.searchsorted(X_spikes[0], spike_times_y)
-        y_spikes = jnp.vstack((spike_times_y, target_idx))
+        y_spikes = jnp.vstack((spike_times_y, jnp.zeros_like(spike_times_y), target_idx))
 
         sorted_spikes = [nap.Ts(np.array(X_spikes[0][X_spikes[1] == n] + binsize / 2)) for n in range(n_neurons)]
         sorted_spikes.append(nap.Ts(np.array(y_spikes[0] + binsize / 2)))
@@ -130,7 +130,7 @@ for k in range(kfold):
         X_counts_test = np.zeros((T, n_neurons))
         for s in range(0, T, batch_size):
             bsize = min(batch_size, T - s)
-            _, y_ct, X_ct, fr_t = simulate.poisson_counts(pres_rate_per_sec, posts_rate_per_sec, binsize,
+            _, y_ct, X_ct, fr_t = simulate.poisson_counts(pres_rate_per_sec, bias_true, binsize,
                                                           bsize, n_neurons, weights_true, window_size, kernels_rc,
                                                           inverse_link)
             y_test[s:s + bsize] = y_ct
@@ -171,6 +171,8 @@ for k in range(kfold):
         X_test_tm = X_test[:int(test_time_sec[tm] / binsize)]
         lam_posts_tm = lam_posts[:n_bins_tot[tm]]
 
+        recording_time = nap.IntervalSet(0, tot_time_sec[tm])
+
         # select interval
         interval = [np.percentile(link_f(lam_posts / (binsize / 2)), 2.5),
                     np.percentile(link_f(lam_posts / (binsize / 2)), 99.5)]
@@ -181,8 +183,8 @@ for k in range(kfold):
             inverse_link_function=inverse_link,
             n_basis_funcs=num_fun_l,
             n_batches_scan=n_batches_scan,
+            n_batches_pa=n_batches_scan,
             history_window=history_window,
-            approx_interval=interval,
             eval_function=GenLaguerreEval(history_window, num_fun_l),
             int_function=GenLaguerreInt(history_window, num_fun_l),
             prod_int_function=GenLaguerreProdIntegral(history_window, num_fun_l),
@@ -192,6 +194,8 @@ for k in range(kfold):
         model_pa = ContinuousPA(
             solver_name="LBFGS",
             observation_model=obs_model_pa,
+            approx_interval=interval,
+            recording_time=recording_time,
             solver_kwargs={"tol": 1e-12}
         ).fit_closed_form(X_spikes_tm, y_spikes_tm)
         times[k, tm, 3] = perf_counter() - tt0

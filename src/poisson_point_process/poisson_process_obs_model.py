@@ -1,6 +1,7 @@
 from typing import Callable, Optional, Union, Tuple
 from numpy.typing import ArrayLike
 
+import warnings
 from functools import partial
 
 import jax
@@ -461,9 +462,25 @@ class PolynomialApproximation(MonteCarloApproximation):
         if self.max_window is None:
             self.max_window = max_window
 
-    def _check_suff(self, X):
+    def _check_suff(self, X, reset):
         if self.suff is None:
             self.suff = self.suff_stats(X)
+        elif reset:
+            self.suff = self.suff_stats(X)
+            warnings.warn(
+                UserWarning(
+                    "Sufficient statistics exist and will be recomputed. "
+                    "If you are fitting the SAME dataset, set reset_suff_stats=False."
+                )
+            )
+        else:
+            warnings.warn(
+                UserWarning(
+                    "Reusing existing sufficient statistics. "
+                    "If you are fitting a DIFFERENT dataset, set reset_suff_stats=True."
+                )
+            )
+
 
     def compute_m(self, spikes_n):
         r"""

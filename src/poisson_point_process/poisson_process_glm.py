@@ -5,7 +5,6 @@ import warnings
 from typing import Any, Callable, NamedTuple, Optional, Tuple, Union
 from numpy.typing import ArrayLike
 
-from functools import partial
 from contextlib import contextmanager
 
 import jax
@@ -15,10 +14,10 @@ import jaxopt
 from poisson_point_process import utils
 from poisson_point_process import poisson_process_obs_model as obs
 from poisson_point_process.base_regressor_PP import BaseRegressor
+from poisson_point_process.regularizer_PP import GroupLasso, UnRegularized, Ridge, Regularizer
 
 from nemos import tree_utils, validation
 from nemos.pytrees import FeaturePytree
-from nemos.regularizer import GroupLasso, Regularizer
 from nemos.typing import DESIGN_INPUT_TYPE
 
 ModelParams = Tuple[jnp.ndarray, jnp.ndarray]
@@ -122,10 +121,15 @@ class ContinuousMC(BaseRegressor):
                 expected_dim=2,
                 err_message="y must be two-dimensional, with shape (2, n_target_spikes).",
             )
-        # if y.shape[0] != 2:
-        #     raise ValueError(
-        #         "y must have shape 2 at dimension 0 corresponding to postsynaptic spike times and indices"
-        #     )
+        if y.shape[0] != 3:
+            raise ValueError(
+                "y must have shape 3 at dimension 0 corresponding to postsynaptic spike times, neurons IDs and indices"
+            )
+
+        if jnp.unique(y[1]) != 0:
+            raise ValueError(
+                "y must have all 0 at dimension 1 (fitting a single postsynaptic neuron)"
+            )
 
         if y.shape[0] != 3:
             raise ValueError(
@@ -292,6 +296,8 @@ class ContinuousMC(BaseRegressor):
         else:
             data = X
 
+        self._check_input_dimensionality(X, y)
+
         if isinstance(self.regularizer, GroupLasso):
             if self.regularizer.mask is None:
                 warnings.warn(
@@ -371,6 +377,8 @@ class ContinuousMC(BaseRegressor):
             data = X.data
         else:
             data = X
+
+        self._check_input_dimensionality(X, y)
 
         # perform a one-step update
         opt_step = self._solver_update(params, opt_state, aux=self.aux, X=data, y=y, *args, **kwargs)
@@ -575,6 +583,7 @@ class ContinuousPA(ContinuousMC):
             regularizer_strength: Optional[float] = None,
             solver_name: str = None,
             solver_kwargs: dict = None,
+            reset_suff_stats = True,
     ):
         super().__init__(
             observation_model=observation_model,
@@ -597,6 +606,8 @@ class ContinuousPA(ContinuousMC):
         self.approx_interval = approx_interval
         self.recording_time = recording_time
         self.observation_model = observation_model
+
+        self.reset_suff_stats = reset_suff_stats
 
     def _set_regularizer_strength(self):
         if self.regularizer_strength is None:
@@ -631,12 +642,14 @@ class ContinuousPA(ContinuousMC):
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
 
         # compute sufficient statistics
-        self.observation_model._check_suff(X)
+        self.observation_model._check_suff(X, self.reset_suff_stats)
 
         if isinstance(X, FeaturePytree):
             data = X.data
         else:
             data = X
+
+        self._check_input_dimensionality(X, y)
 
         if isinstance(self.regularizer, GroupLasso):
             if self.regularizer.mask is None:
@@ -672,7 +685,7 @@ class ContinuousPA(ContinuousMC):
 
         # add max window padding to X and y
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
-        self.observation_model._check_suff(X)
+        self.observation_model._check_suff(X, self.reset_suff_stats)
 
         if isinstance(X, FeaturePytree):
             data = X.data
@@ -713,7 +726,7 @@ class ContinuousPA(ContinuousMC):
         self._initialize_data_params(X, y)
         self._set_regularizer_strength()
         self.observation_model._initialize_data_params(self.recording_time, self.max_window)
-        self.observation_model._check_suff(X)
+        self.observation_model._check_suff(X, self.reset_suff_stats)
 
         # add max window padding to X and y
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
@@ -722,6 +735,8 @@ class ContinuousPA(ContinuousMC):
             data = X.data
         else:
             data = X
+
+        self._check_input_dimensionality(X, y)
 
         # perform a one-step update
         opt_step = self._solver_update(params, opt_state, aux=None, X=data, y=y, *args, **kwargs)
@@ -747,6 +762,17 @@ class ContinuousPA(ContinuousMC):
                 f"Closed form solution requires exponential inverse link function, "
                 f"the inverse link provided is {self.observation_model.inverse_link_function}!"
             )
+
+        if not isinstance(self.regularizer, (UnRegularized, Ridge)):
+            warnings.warn(
+                UserWarning(
+                    f"Closed form solution is not available for {self.regularizer} regularizer, "
+                    "defaulting to UnRegularized. Available regularizers are UnRegularized and Ridge.",
+                )
+            )
+            self.regularizer_strength = None
+
+
         # set data dependent parameters
         self._initialize_data_params(X, y)
         self._set_regularizer_strength()
@@ -755,8 +781,10 @@ class ContinuousPA(ContinuousMC):
         # add max window padding to X and y
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
 
+        self._check_input_dimensionality(X, y)
+
         # compute sufficient statistics
-        self.observation_model._check_suff(X)
+        self.observation_model._check_suff(X, self.reset_suff_stats)
 
         params = self.observation_model._closed_form_solution(X, y, self.approx_interval, self.regularizer_strength)
 
@@ -886,33 +914,6 @@ class PopulationContinuousPA(ContinuousPA):
                 f"the coefficients {params[0].shape[1]} instead!"
             )
         return params
-
-    @staticmethod
-    def _check_input_dimensionality(
-            X: Optional[DESIGN_INPUT_TYPE] = None,
-            y: Optional[jnp.ndarray] = None,
-    ):
-        if y is not None:
-            validation.check_tree_leaves_dimensionality(
-                y,
-                expected_dim=2,
-                err_message="y must be two-dimensional, with shape (3, n_target_spikes).",
-            )
-        if y.shape[0] != 3:
-            raise ValueError(
-                "y must have shape 3 at dimension 0 corresponding to postsynaptic spike times, neuron IDs and indices"
-            )
-        if X is not None:
-            validation.check_tree_leaves_dimensionality(
-                X,
-                expected_dim=2,
-                err_message="X must be two-dimensional, with shape "
-                            "(2, n_spikes) or pytree of the same shape.",
-            )
-        if X.shape[0] != 2:
-            raise ValueError(
-                "X must have shape 2 at dimension 0 corresponding to spike times and neurons ids"
-            )
 
     def _initialize_intercept_matching_mean_rate(
             self,
