@@ -11,18 +11,18 @@ import pynapple as nap
 from poisson_point_process import simulate
 from poisson_point_process.utils import quadratic
 from poisson_point_process.basis import GenLaguerreEval, GenLaguerreInt, GenLaguerreProdIntegral
-from poisson_point_process.poisson_process_glm import ContinuousPA, ContinuousMC
+from poisson_point_process.poisson_process_glm import PopulationContinuousPA, PopulationContinuousMC
 from poisson_point_process.poisson_process_obs_model import PolynomialApproximation, MonteCarloApproximation
 
 jax.config.update("jax_enable_x64", True)
 
-#### EXAMPLE CODE FOR FITTING A SINGLE POSTSYNAPTIC NEURON
+#### EXAMPLE CODE FOR FITTING A RECURRENTLY CONNECTED NEURAL POPULATION
 #### SIMULATION SIZE AND OPTIMIZATION PARAMS ARE CHOSEN TO BE FEASIBLE ON CPU
 
 # jax will prefer GPU if available
 print("JAX is using:", jax.default_backend())
 
-## generate data from all-to-one coupled GLM
+## generate data from all-to-all coupled GLM
 n_neurons = 8
 sim_time = 300
 history_window = 0.005
@@ -49,50 +49,53 @@ print("simulating spike data...")
 np.random.seed(216)
 
 #set generative model parameters
-# baseline firing rate in Hz
-pres_rate_hz = 5
-posts_rate_hz = 2
+# baseline firing rates in Hz
+baseline_fr = jnp.array(np.random.normal(3,1, n_neurons))
 
 # inverse firing rate per bin
-bias_true = phi_inverse(posts_rate_hz * binsize)
+bias_true = phi_inverse(baseline_fr * binsize)
 # generative weights
-weights_true = np.random.normal(0.1, 0.5, n_neurons * n_basis_funcs)
+weights_true = np.random.normal(0.1, 0.5, (n_neurons * n_basis_funcs, n_neurons))
+# force post-spike filters to be negative
+for t, n in enumerate(range(0, weights_true.shape[0], n_basis_funcs)):
+    weights_true[n:n+n_basis_funcs, t] = np.random.normal(-0.2,0.05,4)
 
 # true filters in Hz
-filters_true = phi(np.dot(weights_true.reshape(-1,n_basis_funcs), kernels.T) + bias_true) / binsize
+filters_true = phi(
+    np.einsum(
+        "ikj,tk->ijt", weights_true.reshape(n_neurons,n_basis_funcs,-1), kernels
+    ) + bias_true[None,:,None]
+) / binsize
 
 # step 1: simulate counts
-# post- and presynaptic spike counts and postsynaptic firing rates per bin
-_, y_counts, X_counts, rates = simulate.poisson_counts(pres_rate_hz, bias_true, binsize,
-                                                           n_bins_tot, n_neurons, weights_true, window_size, kernels,
-                                                           phi)
+# spike counts and firing rates per bin
+params_true = (weights_true.reshape(n_neurons,n_basis_funcs,-1).transpose(0,2,1), bias_true)
+spike_counts, rates = simulate.poisson_counts_recurrent(n_bins_tot, n_neurons, window_size, kernels, params_true,
+                                                        phi)
 
 # step 2: convert to spike times
-spike_times, spike_ids = simulate.poisson_times(X_counts, sim_time, binsize)
-spike_times_y, _ = simulate.poisson_times(y_counts[:, None], sim_time, binsize)
+spike_times, spike_ids = simulate.poisson_times(spike_counts, sim_time, binsize)
+
 
 # X_spikes contains all presynaptic spike times and corresponding neuron IDs
 X_spikes = jnp.vstack((spike_times, spike_ids))
 
 # y_spikes contains postsynaptic spike times, IDs, and their insertion indices into
 # the presynaptic spike times array, preserving temporal order (required to perform a scan over spikes)
-# In the single postsynaptic neuron case, neuron ID is always set to 0
-target_idx = jnp.searchsorted(X_spikes[0], spike_times_y)
-y_spikes = jnp.vstack((spike_times_y, jnp.zeros(target_idx.size), target_idx))
+# In the single full population model, every spike is included in y
+y_spikes = jnp.vstack((X_spikes, jnp.arange(spike_times.size)))
 
-print(X_spikes.shape[1], y_spikes.shape[1])
 
 ## fit continuous PA model
 print("fitting PA-c model...")
 
 # set approximation range based on binned firing rates
 approx_interval = [
-    np.percentile(phi_inverse(rates/binsize), 2.5),
-    np.percentile(phi_inverse(rates/binsize), 97.5)
+    np.percentile(phi_inverse(rates/binsize), 2.5, axis=0),
+    np.percentile(phi_inverse(rates/binsize), 97.5, axis=0)
 ]
 
 # initialize PA-c observation model (computes sufficient statistics)
-# Here we apply Ridge regularization to reduce approximation error
 obs_model_pa = PolynomialApproximation(
     inverse_link_function=phi,
     n_basis_funcs=n_basis_funcs,
@@ -105,8 +108,9 @@ obs_model_pa = PolynomialApproximation(
 )
 
 # initialize and fit PA-c model (closed form solution)
+# NOTE that it uses a Population model class
 tt0 = perf_counter()
-model_pa = ContinuousPA(
+model_pa = PopulationContinuousPA(
     regularizer="Ridge",
     regularizer_strength = 100,
     observation_model=obs_model_pa,
@@ -120,9 +124,17 @@ print(f"PA-c fit time: {time_pa}")
 
 # construct estimated filters
 # to avoid model mismatch, we use the approximated quadratic nonlinearity to construct the filters
-weights_pa, bias_pa = model_pa.coef_.reshape(-1,n_basis_funcs), model_pa.intercept_
-filters_pa = quadratic(np.dot(weights_pa, kernels.T)  + bias_pa, phi, approx_interval)
-
+weights_pa, bias_pa = model_pa.coef_.reshape(n_neurons,n_basis_funcs,-1), model_pa.intercept_
+filters_pa = jnp.stack(
+    [
+        quadratic(
+            np.einsum("jki,tk->ijt", weights_pa, kernels)[:,j] + bias_pa[j],
+            phi,
+            (approx_interval[0][j], approx_interval[1][j])
+        )
+        for j in range(n_neurons)
+    ]
+).transpose(1,0,2)
 #compute MSE
 mse_pa = np.mean((filters_true - filters_pa) ** 2)
 
@@ -143,7 +155,8 @@ obs_model_mc = MonteCarloApproximation(
 )
 
 # initialize MC model
-model_mc = ContinuousMC(
+# NOTE that it uses a Population model class
+model_mc = PopulationContinuousMC(
     solver_name="GradientDescent",
     observation_model=obs_model_mc,
     recording_time=nap.IntervalSet(0, sim_time),
@@ -163,18 +176,19 @@ for step in range(num_iter):
 time_mc = perf_counter() - tt0
 print(f"MC fit time: {time_mc}")
 
-# construct estimated filters
-weights_mc, bias_mc = model_mc.coef_.reshape(-1,n_basis_funcs), model_mc.intercept_
-filters_mc = phi(np.dot(weights_mc, kernels.T) + bias_mc)
+# construct estimated filters, shape (pre, post, time)
+weights_mc, bias_mc = model_mc.coef_.reshape(n_neurons,n_basis_funcs,-1), model_mc.intercept_
+filters_mc = phi(np.einsum("jki,tk->ijt", weights_mc, kernels) + bias_mc[None,:,None])
+
 #compute MSE
 mse_mc = np.mean((filters_true - filters_mc) ** 2)
-
 
 ## fit hybrid PA-MC model
 print("fitting hybrid model...")
 # initialize hybrid model
+# NOTE that it uses a Population model class
 # models parameters are initializes at the PA estimate
-model_h = ContinuousMC(
+model_h = PopulationContinuousMC(
     solver_name="GradientDescent",
     observation_model=obs_model_mc,
     recording_time=nap.IntervalSet(0, sim_time),
@@ -195,8 +209,8 @@ time_h = perf_counter() - tt0
 print(f"Hybrid fit time: {time_h}")
 
 # construct estimated filters
-weights_h, bias_h = model_h.coef_.reshape(-1,n_basis_funcs), model_h.intercept_
-filters_h = phi(np.dot(weights_h, kernels.T) + bias_h)
+weights_h, bias_h = model_h.coef_.reshape(n_neurons,n_basis_funcs,-1), model_h.intercept_
+filters_h = phi(np.einsum("jki,tk->ijt", weights_h, kernels) + bias_h[None,:,None])
 #compute MSE
 mse_h = np.mean((filters_true - filters_h) ** 2)
 
@@ -235,6 +249,6 @@ results = {
 save_path = "../_results/pp_glm_results.npz"
 os.makedirs("../_results", exist_ok=True)
 np.savez(save_path, **results)
-print("results saved to _results/pp_glm_results.npz")
+print("results saved to _results/population_pp_glm_results.npz")
 
 print("script terminated")

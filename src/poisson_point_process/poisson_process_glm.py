@@ -126,11 +126,6 @@ class ContinuousMC(BaseRegressor):
                 "y must have shape 3 at dimension 0 corresponding to postsynaptic spike times, neurons IDs and indices"
             )
 
-        if jnp.unique(y[1]) != 0:
-            raise ValueError(
-                "y must have all 0 at dimension 1 (fitting a single postsynaptic neuron)"
-            )
-
         if y.shape[0] != 3:
             raise ValueError(
                 "y must have shape 3 at dimension 0 corresponding to postsynaptic spike times, neuron IDs and indices"
@@ -524,6 +519,12 @@ class PopulationContinuousMC(ContinuousMC):
             raise ValueError(
                 "y must have shape 3 at dimension 0 corresponding to postsynaptic spike times, neuron IDs and indices"
             )
+
+        if len(jnp.unique(y[1])) == 1:
+            raise ValueError(
+                "y must have IDs of all neurons of the population at dimension 1 (a single ID provided)"
+            )
+
         if X is not None:
             validation.check_tree_leaves_dimensionality(
                 X,
@@ -610,6 +611,15 @@ class ContinuousPA(ContinuousMC):
         self.reset_suff_stats = reset_suff_stats
 
     def _set_regularizer_strength(self):
+        if self.regularizer_strength is not None and isinstance(self.regularizer, UnRegularized):
+            warnings.warn(
+                UserWarning(
+                    "Unused parameter `regularizer_strength` for UnRegularized GLM. "
+                    "The regularizer strength parameter is not required and won't be used "
+                    "when the regularizer is set to UnRegularized."
+                )
+            )
+            self.regularizer_strength = 0
         if self.regularizer_strength is None:
             self.regularizer_strength = 0
 
@@ -764,14 +774,10 @@ class ContinuousPA(ContinuousMC):
             )
 
         if not isinstance(self.regularizer, (UnRegularized, Ridge)):
-            warnings.warn(
-                UserWarning(
-                    f"Closed form solution is not available for {self.regularizer} regularizer, "
-                    "defaulting to UnRegularized. Available regularizers are UnRegularized and Ridge.",
-                )
+            raise ValueError(
+                f"Closed form solution is not available for {self.regularizer} regularizer. "
+                "Available regularizers are UnRegularized and Ridge."
             )
-            self.regularizer_strength = None
-
 
         # set data dependent parameters
         self._initialize_data_params(X, y)
@@ -845,6 +851,7 @@ class PopulationContinuousPA(ContinuousPA):
             regularizer_strength: Optional[float] = None,
             solver_name: str = None,
             solver_kwargs: dict = None,
+            reset_suff_stats=True,
     ):
         super().__init__(
             observation_model=observation_model,
@@ -854,6 +861,7 @@ class PopulationContinuousPA(ContinuousPA):
             regularizer_strength=regularizer_strength,
             solver_name=solver_name,
             solver_kwargs=solver_kwargs,
+            reset_suff_stats=reset_suff_stats,
         )
 
         # initialize to None fit output
@@ -914,6 +922,44 @@ class PopulationContinuousPA(ContinuousPA):
                 f"the coefficients {params[0].shape[1]} instead!"
             )
         return params
+
+    @staticmethod
+    def _check_input_dimensionality(
+            X: Optional[DESIGN_INPUT_TYPE] = None,
+            y: Optional[jnp.ndarray] = None,
+    ):
+        if y is not None:
+            validation.check_tree_leaves_dimensionality(
+                y,
+                expected_dim=2,
+                err_message="y must be two-dimensional, with shape (3, n_target_spikes).",
+            )
+        if y.shape[0] != 3:
+            raise ValueError(
+                "y must have shape 3 at dimension 0 corresponding to postsynaptic spike times, neuron IDs and indices"
+            )
+
+        if y.shape[0] != 3:
+            raise ValueError(
+                "y must have shape 3 at dimension 0 corresponding to postsynaptic spike times, neuron IDs and indices"
+            )
+
+        if len(jnp.unique(y[1])) == 1:
+            raise ValueError(
+                "y must have IDs of all neurons of the population at dimension 1 (a single ID provided)"
+            )
+
+        if X is not None:
+            validation.check_tree_leaves_dimensionality(
+                X,
+                expected_dim=2,
+                err_message="X must be two-dimensional, with shape "
+                            "(2, n_spikes) or pytree of the same shape.",
+            )
+        if X.shape[0] != 2:
+            raise ValueError(
+                "X must have shape 2 at dimension 0 corresponding to spike times and neurons ids"
+            )
 
     def _initialize_intercept_matching_mean_rate(
             self,

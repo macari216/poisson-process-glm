@@ -4,22 +4,28 @@ A memory-efficient implementation of a Poisson point process GLM for massive dat
 
 ## Installation
 
-To install the packege in editable mode (along with all dependencies):
+To install the packege (along with all dependencies):
 
 ```bash
+pip install git+https://github.com/macari216/poisson-process-glm.git
+```
+To install in editable mode:
+```bash
+git clone https://github.com/macari216/poisson-process-glm.git
 cd poisson-process-glm
 pip install -e .
 ```
 
-## Example script
-This script shows how to run and evaluate the models on data simulated from all-to-one coupled GLM. It is for demonstration only and does not reproduce specific figures. 
-The script is designed to run on GPU; while it can fall back to CPU, run times may be significantly longer.
+## Example scripts
+There are two example scripts that introduce fitting Monte Carlo (MC), polynomial approximation (PA), 
+and hybrid PA-MC PPGLMs on simulated data. `run_pp_glm.py` fits a single postsyaptic neuron and `run_population_pp_glm.py` 
+fits a small recurrently connected neuronal population.
 
 To run:
 
 ```bash
 cd poisson-process-glm/_scripts
-python run_pp_glm.py
+python run_pp_glm.py # or run_population_pp_glm.py
 ```
 
 The output will be saved to `poisson-process-glm/_results/pp_glm_results.npz`.
