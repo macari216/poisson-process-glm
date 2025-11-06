@@ -653,6 +653,7 @@ class ContinuousPA(ContinuousMC):
 
         # compute sufficient statistics
         self.observation_model._check_suff(X, self.reset_suff_stats)
+        self.reset_suff_stats=False
 
         if isinstance(X, FeaturePytree):
             data = X.data
@@ -695,7 +696,6 @@ class ContinuousPA(ContinuousMC):
 
         # add max window padding to X and y
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)
-        self.observation_model._check_suff(X, self.reset_suff_stats)
 
         if isinstance(X, FeaturePytree):
             data = X.data
@@ -736,7 +736,12 @@ class ContinuousPA(ContinuousMC):
         self._initialize_data_params(X, y)
         self._set_regularizer_strength()
         self.observation_model._initialize_data_params(self.recording_time, self.max_window)
-        self.observation_model._check_suff(X, self.reset_suff_stats)
+        if self.observation_model.suff is None:
+            raise ValueError(
+                "The model was not initialized and sufficient statistics were not computed. "
+                "Run model.intialize_state() before model.update()"
+            )
+        # self.observation_model._check_suff(X, self.reset_suff_stats)
 
         # add max window padding to X and y
         X, y = utils.adjust_indices_and_spike_times(X, self.observation_model.history_window, self.max_window, y)

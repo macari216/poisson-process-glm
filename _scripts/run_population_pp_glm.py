@@ -128,7 +128,7 @@ weights_pa, bias_pa = model_pa.coef_.reshape(n_neurons,n_basis_funcs,-1), model_
 filters_pa = jnp.stack(
     [
         quadratic(
-            np.einsum("jki,tk->ijt", weights_pa, kernels)[:,j] + bias_pa[j],
+            np.einsum("ikj,tk->ijt", weights_pa, kernels)[:,j] + bias_pa[j],
             phi,
             (approx_interval[0][j], approx_interval[1][j])
         )
@@ -178,7 +178,7 @@ print(f"MC fit time: {time_mc}")
 
 # construct estimated filters, shape (pre, post, time)
 weights_mc, bias_mc = model_mc.coef_.reshape(n_neurons,n_basis_funcs,-1), model_mc.intercept_
-filters_mc = phi(np.einsum("jki,tk->ijt", weights_mc, kernels) + bias_mc[None,:,None])
+filters_mc = phi(np.einsum("ijk,tk->ijt", weights_mc, kernels) + bias_mc[None,:,None])
 
 #compute MSE
 mse_mc = np.mean((filters_true - filters_mc) ** 2)
@@ -210,7 +210,7 @@ print(f"Hybrid fit time: {time_h}")
 
 # construct estimated filters
 weights_h, bias_h = model_h.coef_.reshape(n_neurons,n_basis_funcs,-1), model_h.intercept_
-filters_h = phi(np.einsum("jki,tk->ijt", weights_h, kernels) + bias_h[None,:,None])
+filters_h = phi(np.einsum("ikj,tk->ijt", weights_h, kernels) + bias_h[None,:,None])
 #compute MSE
 mse_h = np.mean((filters_true - filters_h) ** 2)
 

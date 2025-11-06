@@ -58,7 +58,7 @@ class MonteCarloApproximation(Observations):
         dt = self.T / self.M
         starts, ends = self.recording_time.start, self.recording_time.end
         M_sub = jnp.floor((ends - starts) / dt).astype(int)
-        M_sub = M_sub.at[1].set(M_sub[1] + 1)
+        M_sub = M_sub.at[-1].set(self.M - jnp.sum(M_sub[:-1]))
         return jnp.concatenate([jnp.linspace(s + dt, e, m) - dt / 2 for s, e, m in zip(starts, ends, M_sub)])
 
     def _initialize_data_params(
@@ -99,7 +99,7 @@ class MonteCarloApproximation(Observations):
             jax.nn.softplus: lambda x, b, y: y * jax.nn.softplus(b) + jax.nn.sigmoid(b) * (x - y * b),
         }
         approx_func = APPROX_FUNCS.get(self.inverse_link_function, None)
-        # approx_func = lambda x, b, y: x
+
         return approx_func(x, b, t)
 
     def compute_control_variate_MC_est(
@@ -121,8 +121,7 @@ class MonteCarloApproximation(Observations):
             )
             dts = spk_in_window[0] - i[0]
             lam_tilde = self.compute_lam_tilde(dts, weights[spk_in_window[1].astype(int)], bias)
-            lam_tilde_s += lam_tilde
-            # lam_tilde_s += self.taylor_approx(lam_tilde, bias)
+            lam_tilde_s += self.taylor_approx(lam_tilde, bias)
             lam_s += self.inverse_link_function(lam_tilde)
             return (lam_s, lam_tilde_s), lam_tilde
 
@@ -136,12 +135,11 @@ class MonteCarloApproximation(Observations):
         sub, _ = scan_vmap(padding[None, :])
         lam_tilde_v = jnp.concatenate(lam_tilde_v, axis=0)[:y.shape[1]]
         lam_v = self.inverse_link_function(lam_tilde_v)
-        # lam_tilde_v = self.taylor_approx(lam_tilde_v, bias)
+        lam_tilde_v = self.taylor_approx(lam_tilde_v, bias)
         I_hat = (self.T / M) * (jnp.sum(out[0], axis=0) - jnp.sum(sub[0], axis=0))
         U_hat = (self.T / M) * (jnp.sum(out[1], axis=0) - jnp.sum(sub[1], axis=0))
         w = jnp.vstack((weights.reshape(-1, n_target), bias))
-        U = jnp.dot(self.Cj, w)
-        # U = self.taylor_approx(jnp.dot(self.Cj, w), bias, self.T)
+        U = self.taylor_approx(jnp.dot(self.Cj, w), bias, self.T)
 
         cov = jnp.sum((lam_v - jnp.mean(lam_v, axis=0)) * (lam_tilde_v - jnp.mean(lam_tilde_v, axis=0)), axis=0)
         var_lam_tilde = jnp.clip(jnp.sum((lam_tilde_v - jnp.mean(lam_tilde_v, axis=0)) ** 2, axis=0), min=jnp.finfo(lam_tilde_v.dtype).eps)

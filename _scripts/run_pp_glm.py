@@ -80,8 +80,6 @@ X_spikes = jnp.vstack((spike_times, spike_ids))
 target_idx = jnp.searchsorted(X_spikes[0], spike_times_y)
 y_spikes = jnp.vstack((spike_times_y, jnp.zeros(target_idx.size), target_idx))
 
-print(X_spikes.shape[1], y_spikes.shape[1])
-
 ## fit continuous PA model
 print("fitting PA-c model...")
 
@@ -133,6 +131,7 @@ print("fitting MC model...")
 # initialize MC observation model (computes nll)
 # draw 500,000 MC samples per gradient step
 obs_model_mc = MonteCarloApproximation(
+    inverse_link_function=phi,
     n_basis_funcs=n_basis_funcs,
     n_batches_scan=1,
     history_window=history_window,
