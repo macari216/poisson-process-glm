@@ -12,7 +12,6 @@ from nemos.typing import DESIGN_INPUT_TYPE
 
 from . import utils
 
-from time import perf_counter
 
 class MonteCarloApproximation(Observations):
     def __init__(
@@ -24,9 +23,8 @@ class MonteCarloApproximation(Observations):
             mc_n_samples=None,
             control_var=False,
             int_function=None,
-            inverse_link_function=jnp.exp,
     ):
-        super().__init__(inverse_link_function=inverse_link_function)
+        super().__init__()
         self.scale = 1.0
         self.recording_time = None
         self.T = None
@@ -44,6 +42,10 @@ class MonteCarloApproximation(Observations):
         self.M = mc_n_samples
         self.int_function = int_function
         self.control_var = control_var
+
+    @property
+    def default_inverse_link_function(self):
+        return jnp.exp
 
     def _set_ll_function(self):
         self.ll_function_MC = self.compute_control_variate_MC_est if self.control_var else self.compute_MC_est
@@ -87,18 +89,18 @@ class MonteCarloApproximation(Observations):
 
         return mc_spikes
 
-    @partial(jax.jit, static_argnames=("self",))
+    # @partial(jax.jit, static_argnames=("self",))
     def compute_lam_tilde(self, dts, weights, bias):
         fx = self.eval_function(dts)
         return jnp.sum(fx[:, :, None] * weights, axis=(0, 1)) + bias
 
-    @partial(jax.jit, static_argnames="self")
-    def taylor_approx(self, x, b, t=1):
+    # @partial(jax.jit, static_argnames="self")
+    def taylor_approx(self, x, b, inv_link_f, t=1):
         APPROX_FUNCS = {
             jnp.exp: lambda x, b, y: jnp.exp(b) * (y * (1 - b) + x),
             jax.nn.softplus: lambda x, b, y: y * jax.nn.softplus(b) + jax.nn.sigmoid(b) * (x - y * b),
         }
-        approx_func = APPROX_FUNCS.get(self.inverse_link_function, None)
+        approx_func = APPROX_FUNCS.get(inv_link_f, None)
 
         return approx_func(x, b, t)
 
@@ -108,7 +110,7 @@ class MonteCarloApproximation(Observations):
             y: jnp.array,
             M,
             params: Tuple[jnp.array, jnp.array],
-            beta_old: float,
+            inverse_link_function: Callable,
     ):
         weights, bias = params
         weights = utils.reshape_w(weights, self.n_basis_funcs)
@@ -121,8 +123,8 @@ class MonteCarloApproximation(Observations):
             )
             dts = spk_in_window[0] - i[0]
             lam_tilde = self.compute_lam_tilde(dts, weights[spk_in_window[1].astype(int)], bias)
-            lam_tilde_s += self.taylor_approx(lam_tilde, bias)
-            lam_s += self.inverse_link_function(lam_tilde)
+            lam_tilde_s += self.taylor_approx(lam_tilde, bias, inv_link_f=inverse_link_function)
+            lam_s += inverse_link_function(lam_tilde)
             return (lam_s, lam_tilde_s), lam_tilde
 
         scan_vmap = jax.vmap(
@@ -134,27 +136,31 @@ class MonteCarloApproximation(Observations):
         out, lam_tilde_v = scan_vmap(shifted_spikes_array)
         sub, _ = scan_vmap(padding[None, :])
         lam_tilde_v = jnp.concatenate(lam_tilde_v, axis=0)[:y.shape[1]]
-        lam_v = self.inverse_link_function(lam_tilde_v)
+        lam_v = inverse_link_function(lam_tilde_v)
         lam_tilde_v = self.taylor_approx(lam_tilde_v, bias)
         I_hat = (self.T / M) * (jnp.sum(out[0], axis=0) - jnp.sum(sub[0], axis=0))
         U_hat = (self.T / M) * (jnp.sum(out[1], axis=0) - jnp.sum(sub[1], axis=0))
         w = jnp.vstack((weights.reshape(-1, n_target), bias))
         U = self.taylor_approx(jnp.dot(self.Cj, w), bias, self.T)
 
-        cov = jnp.sum((lam_v - jnp.mean(lam_v, axis=0)) * (lam_tilde_v - jnp.mean(lam_tilde_v, axis=0)), axis=0)
-        var_lam_tilde = jnp.clip(jnp.sum((lam_tilde_v - jnp.mean(lam_tilde_v, axis=0)) ** 2, axis=0), min=jnp.finfo(lam_tilde_v.dtype).eps)
+        cov = jnp.sum(
+            (lam_v - jnp.mean(lam_v, axis=0)) * (lam_tilde_v - jnp.mean(lam_tilde_v, axis=0))
+            , axis=0
+        )
+        var_lam_tilde = jnp.clip(
+            jnp.sum((lam_tilde_v - jnp.mean(lam_tilde_v, axis=0)) ** 2, axis=0),
+            min=jnp.finfo(lam_tilde_v.dtype).eps
+        )
         # var_lam = jnp.clip(jnp.sum((lam_v - jnp.mean(lam_v, axis=0)) ** 2, axis=0), min=jnp.finfo(lam_v.dtype).eps)
         # corr = cov/(jnp.sqrt(var_lam)*jnp.sqrt(var_lam_tilde))
 
         beta_new = jnp.clip(-1 * cov/var_lam_tilde, -1, 0)
 
-        # EMA
-        # beta = 0.995 * beta_old + (1 - 0.995) * beta_new
         beta = beta_new
 
         # jax.debug.print("cov {}, var {}", cov, var_lam_tilde)
         # jax.debug.print("corr {}", corr)
-        return jnp.sum(I_hat + beta * (U_hat - U)), beta
+        return jnp.sum(I_hat + beta * (U_hat - U))
 
     def compute_MC_est(
             self,
@@ -162,7 +168,7 @@ class MonteCarloApproximation(Observations):
             y: jnp.array,
             M,
             params: Tuple[jnp.array, jnp.array],
-            beta_old: float,
+            inverse_link_function: Callable,
     ):
         weights, bias = params
         weights = utils.reshape_w(weights, self.n_basis_funcs)
@@ -174,7 +180,7 @@ class MonteCarloApproximation(Observations):
             )
             dts = spk_in_window[0] - i[0]
             lam_tilde = self.compute_lam_tilde(dts, weights[spk_in_window[1].astype(int)], bias)
-            lam_s += self.inverse_link_function(lam_tilde)
+            lam_s += inverse_link_function(lam_tilde)
             return lam_s, None
 
         scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.zeros(n_target), idxs), in_axes=0)
@@ -182,13 +188,14 @@ class MonteCarloApproximation(Observations):
         shifted_spikes_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
         out, _ = scan_vmap(shifted_spikes_array)
         sub, _ = scan_vmap(padding[None, :])
-        return (self.T / M) * (jnp.sum(out) - jnp.sum(sub)), beta_old
+        return (self.T / M) * (jnp.sum(out) - jnp.sum(sub))
 
     def compute_summed_ll(
             self,
             X: DESIGN_INPUT_TYPE,
             y: jnp.array,
             params: Tuple[jnp.array, jnp.array],
+            inverse_link_function: Callable,
             log=True
     ):
         r"""
@@ -212,7 +219,6 @@ class MonteCarloApproximation(Observations):
 
         weights, bias = params
         weights = utils.reshape_w(weights, self.n_basis_funcs)
-        n_target = weights.shape[-1]
 
         # body of the scan function
         def scan_fn(lam_s, i):
@@ -222,7 +228,7 @@ class MonteCarloApproximation(Observations):
             dts = spk_in_window[0] - i[0]
             lam_tilde = self.compute_lam_tilde(dts, weights[spk_in_window[1].astype(int), :, i[1].astype(int), None],
                                           bias[i[1].astype(int)])
-            lam_s += optional_log(self.inverse_link_function(lam_tilde)).sum()
+            lam_s += optional_log(inverse_link_function(lam_tilde)).sum()
             return lam_s, None
 
         scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.array(0), idxs), in_axes=0)
@@ -236,6 +242,7 @@ class MonteCarloApproximation(Observations):
             self,
             X,
             y,
+            inverse_link_function: Optional = None,
             params: Optional = None,
             random_key: Optional = None,
             beta: Optional = None,
@@ -258,21 +265,22 @@ class MonteCarloApproximation(Observations):
             X,
             y,
             params,
+            inverse_link_function,
             log=True
         )
 
         mc_samples = self.draw_mc_sample(X, self.M, random_key)
-        mc_estimate, beta_new = self.ll_function_MC(
+        mc_estimate = self.ll_function_MC(
             X,
             mc_samples,
             self.M,
             params,
-            beta,
+            inverse_link_function,
         )
 
         # jax.debug.print("int {}, log lam {}", mc_estimate, log_lam_y)
 
-        return mc_estimate - log_lam_y, beta_new
+        return mc_estimate - log_lam_y
 
     def _predict(
             self,
@@ -426,10 +434,8 @@ class PolynomialApproximation(MonteCarloApproximation):
             eval_function,
             int_function,
             prod_int_function,
-            inverse_link_function=jnp.exp,
     ):
         super().__init__(
-            inverse_link_function=inverse_link_function,
             n_basis_funcs = n_basis_funcs,
             n_batches_scan = n_batches_scan,
             history_window = history_window,
@@ -634,7 +640,7 @@ class PolynomialApproximation(MonteCarloApproximation):
 
         return [m, M]
 
-    def integral_approximation(self, params, approx_interval):
+    def integral_approximation(self, params, approx_interval, inverse_link_function):
         """
         computes a quadratic approximation to the Poisson point process CIF
         Parameters:
@@ -644,7 +650,7 @@ class PolynomialApproximation(MonteCarloApproximation):
            approximate CIF evaluation
         """
         w = utils.concat_params(params)
-        coefs = utils.compute_chebyshev(self.inverse_link_function, approx_interval)
+        coefs = utils.compute_chebyshev(inverse_link_function, approx_interval)
         linear_term = jnp.dot(self.suff[0], w)
         quadratic_term = jnp.einsum('in,ij,jn->n', w, self.suff[1], w)
 
@@ -693,6 +699,7 @@ class PolynomialApproximation(MonteCarloApproximation):
             X,
             y,
             approx_interval,
+            inverse_link_function,
             reg_strength: Optional = 0.,
     ):
         if len(self.suff) == 2:
@@ -711,7 +718,7 @@ class PolynomialApproximation(MonteCarloApproximation):
         def weights_cf_batch(ab, bb):
             return jax.vmap(weights_cf_single, in_axes=(2, 1), out_axes=1)(ab, bb)
 
-        coefs = utils.compute_chebyshev(self.inverse_link_function, approx_interval)
+        coefs = utils.compute_chebyshev(inverse_link_function, approx_interval)
         if coefs.shape[1] > 300:
             batch_size = 300
             # n_batches = int(jnp.ceil(b.shape[1] / batch_size))
@@ -739,16 +746,18 @@ class PolynomialApproximation(MonteCarloApproximation):
             random_key: Optional = None,
             suff: Optional = None,
             approx_interval: Optional=None,
+            inverse_link_function: Optional = None
     ):
 
         log_lam_y = self.compute_summed_ll(
             X,
             y,
             params,
+            inverse_link_function,
             log=True
         )
 
-        estimated_rate = self.integral_approximation(params, approx_interval)
+        estimated_rate = self.integral_approximation(params, approx_interval, inverse_link_function)
 
         return jnp.sum(estimated_rate) - log_lam_y
 
@@ -756,6 +765,7 @@ class PolynomialApproximation(MonteCarloApproximation):
             self,
             X,
             y,
+            true_inv_link_f: Optional = None,
             scale: Union[float, jnp.ndarray] = 1.0,
             aggregate_sample_scores: Callable = jnp.mean,
             params: Optional = None,
@@ -780,11 +790,11 @@ class PolynomialApproximation(MonteCarloApproximation):
             X,
             y,
             params,
+            true_inv_link_f,
             log=True
         )
 
-        true_inv_link = self.inverse_link_function
-        self.inverse_link_function = lambda x: jax.nn.relu(utils.quadratic(x, true_inv_link, approx_interval)).squeeze()
+        inverse_link_function = lambda x: jax.nn.relu(utils.quadratic(x, true_inv_link_f, approx_interval)).squeeze()
         mc_samples = self.draw_mc_sample(X, M=int(3e6), random_key=jax.random.PRNGKey(0))
         mc_estimate, _ = self.compute_MC_est(
             X,
@@ -792,17 +802,18 @@ class PolynomialApproximation(MonteCarloApproximation):
             M=int(3e6),
             params=params,
             beta_old=0,
+            inverse_link_function=inverse_link_function,
         )
 
         nll = mc_estimate - log_lam_y
 
-        self.inverse_link_function = true_inv_link
         return -nll
 
     def _predict(
             self,
             X: Union[DESIGN_INPUT_TYPE, ArrayLike],
             params: Tuple[jnp.array, jnp.array],
+            inverse_link_function: Optional = None,
             approx_interval: Optional = None,
             bin_size: Optional = 0.001,
             time_int: Optional = None,
@@ -816,7 +827,7 @@ class PolynomialApproximation(MonteCarloApproximation):
             )
             dts = spk_in_window[0] - t[0]
             dot_prod = self.compute_lam_tilde(dts, weights[spk_in_window[1].astype(int)], bias)
-            pred_rate = utils.quadratic(dot_prod, self.inverse_link_function, approx_interval)
+            pred_rate = utils.quadratic(dot_prod, inverse_link_function, approx_interval)
             return None, pred_rate
 
         scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(int_f_scan, None, idxs), in_axes=0, out_axes=1)

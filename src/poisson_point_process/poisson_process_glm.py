@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional, Tuple, Union
 from numpy.typing import ArrayLike
-
-from contextlib import contextmanager
 
 import jax
 import jax.numpy as jnp
@@ -19,6 +18,7 @@ from poisson_point_process.regularizer_PP import GroupLasso, UnRegularized, Ridg
 from nemos import tree_utils, validation
 from nemos.pytrees import FeaturePytree
 from nemos.typing import DESIGN_INPUT_TYPE
+from nemos.solvers._compute_defaults import glm_compute_optimal_stepsize_configs
 
 ModelParams = Tuple[jnp.ndarray, jnp.ndarray]
 
@@ -34,6 +34,7 @@ class ContinuousMC(BaseRegressor):
             random_key: ArrayLike = jax.random.PRNGKey(0),
             regularizer: Union[str, Regularizer] = "UnRegularized",
             regularizer_strength: Optional[float] = None,
+            inverse_link_function: Optional[Callable] = None,
             solver_name: str = None,
             solver_kwargs: dict = None,
     ):
@@ -53,9 +54,10 @@ class ContinuousMC(BaseRegressor):
         self.T = None
         self.max_window = None
 
+        self.inverse_link_function = inverse_link_function
         self.recording_time = recording_time
         self.observation_model = observation_model
-        self.aux = (random_key, 0.)
+        self.aux = (random_key,)
 
     @staticmethod
     def _check_params(
@@ -190,11 +192,11 @@ class ContinuousMC(BaseRegressor):
         """Loss function for a given model to be optimized over."""
 
         new_key, subkey = jax.random.split(aux[0])
-        beta = aux[1]
 
-        neg_ll, new_beta = self.observation_model._negative_log_likelihood(X, y, params, subkey, beta)
+        neg_ll = self.observation_model._negative_log_likelihood(X, y, self.inverse_link_function,
+                                                                           params, subkey)
 
-        return neg_ll, (new_key, new_beta)
+        return neg_ll, (new_key,)
 
     def get_optimal_solver_params_config(self):
         """Return the functions for computing default step and batch size for the solver."""
@@ -205,7 +207,6 @@ class ContinuousMC(BaseRegressor):
 
     def _initialize_intercept_matching_mean_rate(
             self,
-            inverse_link_function: Callable,
             y: jnp.ndarray,
     ) -> jnp.ndarray:
 
@@ -214,7 +215,7 @@ class ContinuousMC(BaseRegressor):
             jax.nn.softplus: lambda x: jnp.log(jnp.exp(x) - 1.0),
         }
 
-        analytical_inv = INVERSE_FUNCS.get(inverse_link_function, None)
+        analytical_inv = INVERSE_FUNCS.get(self.inverse_link_function, None)
 
         out = analytical_inv(y.shape[1] / self.recording_time.tot_length())
 
@@ -226,9 +227,7 @@ class ContinuousMC(BaseRegressor):
             y: jnp.ndarray
     ) -> Tuple[Union[dict, jnp.ndarray], jnp.ndarray]:
         # set initial intercept as the inverse of firing rate
-        initial_intercept = self._initialize_intercept_matching_mean_rate(
-            self.observation_model.inverse_link_function, y
-        )
+        initial_intercept = self._initialize_intercept_matching_mean_rate(y)
         # get coef dimensions
         n_neurons = len(jnp.unique(X[1]))
 
@@ -276,6 +275,7 @@ class ContinuousMC(BaseRegressor):
             X: DESIGN_INPUT_TYPE,
             y: jnp.ndarray,
             init_params,
+            cast_to_jax_and_drop_nans: bool = False,
     ) -> Union[Any, NamedTuple]:
         """Initialize the state of the solver for running fit and update."""
         # set data dependent parameters
@@ -305,10 +305,10 @@ class ContinuousMC(BaseRegressor):
                 self.regularizer.mask = jnp.ones_like(init_params[0])
 
         # this should do nothing
-        opt_solver_kwargs = self.optimize_solver_params(data, y)
+        opt_solver_kwargs = self._optimize_solver_params(data, y)
 
         self.instantiate_solver(solver_kwargs=opt_solver_kwargs)
-        opt_state = self._solver_init_state(init_params, aux=self.aux, X=data, y=y)
+        opt_state = self._solver_init_state(init_params, data, y, self.aux)
 
         return opt_state
 
@@ -336,7 +336,7 @@ class ContinuousMC(BaseRegressor):
 
         self.initialize_state(X, y, init_params)
 
-        params, state = self._solver_run(init_params, aux=self.aux, X=data, y=y)
+        params, state = self._solver_run(init_params, data, y, self.aux)
 
         if tree_utils.pytree_map_and_reduce(
                 lambda x: jnp.any(jnp.isnan(x)), any, params
@@ -376,7 +376,7 @@ class ContinuousMC(BaseRegressor):
         self._check_input_dimensionality(X, y)
 
         # perform a one-step update
-        opt_step = self._solver_update(params, opt_state, aux=self.aux, X=data, y=y, *args, **kwargs)
+        opt_step = self._solver_update(params, opt_state, data, y, self.aux, *args, **kwargs)
 
         if tree_utils.pytree_map_and_reduce(
                 lambda x: jnp.any(jnp.isnan(x)), any, opt_step[0]
@@ -393,6 +393,10 @@ class ContinuousMC(BaseRegressor):
         self.aux = opt_step[1].aux
 
         return opt_step
+
+    def _get_optimal_solver_params_config(self):
+        """Return the functions for computing default step and batch size for the solver."""
+        return glm_compute_optimal_stepsize_configs(self)
 
     def predict(
             self,
@@ -423,6 +427,86 @@ class ContinuousMC(BaseRegressor):
         """Simulate neural activity in response to a feed-forward input and recurrent activity."""
         pass
 
+    def save_params(
+        self,
+        filename: Union[str, Path],
+        fit_attrs: dict,
+        string_attrs: list = None,
+    ):
+        """
+        Save GLM model parameters to a .npz file.
+
+        This method allows to reuse the model parameters. The saved parameters can be loaded back
+        into a GLM instance using the `load_params` function.
+
+        Parameters
+        ----------
+        filename :
+            The name of the file where the model parameters will be saved. The file will be saved in `.npz` format.
+
+        Examples
+        --------
+        >>> import nemos as nmo
+        >>> # Create a GLM model with specified parameters
+        >>> solver_args = {"stepsize": 0.1, "maxiter": 1000, "tol": 1e-6}
+        >>> model = nmo.glm.GLM(
+        ...     regularizer="Ridge",
+        ...     regularizer_strength=0.1,
+        ...     observation_model="Gamma",
+        ...     solver_name="BFGS",
+        ...     solver_kwargs=solver_args,
+        ... )
+        >>> for key, value in model.get_params().items():
+        ...     print(f"{key}: {value}")
+        inverse_link_function: <function one_over_x at ...>
+        observation_model: GammaObservations()
+        regularizer: Ridge()
+        regularizer_strength: 0.1
+        solver_kwargs: {'stepsize': 0.1, 'maxiter': 1000, 'tol': 1e-06}
+        solver_name: BFGS
+        >>> # Save the model parameters to a file
+        >>> model.save_params("model_params.npz")
+        >>> # Load the model from the saved file
+        >>> model = nmo.load_model("model_params.npz")
+        >>> # Model has the same parameters before and after load
+        >>> for key, value in model.get_params().items():
+        ...     print(f"{key}: {value}")
+        inverse_link_function: <function one_over_x at ...>
+        observation_model: GammaObservations()
+        regularizer: Ridge()
+        regularizer_strength: 0.1
+        solver_kwargs: {'stepsize': 0.1, 'maxiter': 1000, 'tol': 1e-06}
+        solver_name: BFGS
+
+        >>> # Saving and loading a custom inverse link function
+        >>> model = nmo.glm.GLM(
+        ...     observation_model="Poisson",
+        ...     inverse_link_function=lambda x: x**2
+        ... )
+        >>> model.save_params("model_params.npz")
+        >>> # Provide a mapping for the custom link function when loading.
+        >>> mapping_dict = {
+        ...     "inverse_link_function": lambda x: x**2,
+        ... }
+        >>> loaded_model = nmo.load_model("model_params.npz", mapping_dict=mapping_dict)
+        >>> # Now the loaded model will have the updated solver_name and solver_kwargs
+        >>> for key, value in loaded_model.get_params().items():
+        ...     print(f"{key}: {value}")
+        inverse_link_function: <function <lambda> at ...>
+        observation_model: PoissonObservations()
+        regularizer: UnRegularized()
+        regularizer_strength: None
+        solver_kwargs: {}
+        solver_name: GradientDescent
+        """
+
+        # initialize saving dictionary
+        fit_attrs = self._get_fit_state()
+        fit_attrs.pop("solver_state_")
+        string_attrs = ["inverse_link_function"]
+
+        super().save_params(filename, fit_attrs, string_attrs)
+
 
 class PopulationContinuousMC(ContinuousMC):
     def __init__(
@@ -432,6 +516,7 @@ class PopulationContinuousMC(ContinuousMC):
             random_key: ArrayLike = jax.random.PRNGKey(0),
             regularizer: Union[str, Regularizer] = "UnRegularized",
             regularizer_strength: Optional[float] = None,
+            inverse_link_function: Optional[Callable] = None,
             solver_name: str = None,
             solver_kwargs: dict = None,
     ):
@@ -440,6 +525,7 @@ class PopulationContinuousMC(ContinuousMC):
             recording_time=recording_time,
             regularizer=regularizer,
             regularizer_strength=regularizer_strength,
+            inverse_link_function=inverse_link_function,
             solver_name=solver_name,
             solver_kwargs=solver_kwargs,
         )
@@ -453,9 +539,10 @@ class PopulationContinuousMC(ContinuousMC):
         self.T = None
         self.max_window = None
 
+        self.inverse_link_function = inverse_link_function
         self.recording_time = recording_time
         self.observation_model = observation_model
-        self.aux = (random_key,0.)
+        self.aux = (random_key,)
 
     @staticmethod
     def _check_params(
@@ -539,7 +626,6 @@ class PopulationContinuousMC(ContinuousMC):
 
     def _initialize_intercept_matching_mean_rate(
             self,
-            inverse_link_function: Callable,
             y: jnp.ndarray,
     ) -> jnp.ndarray:
 
@@ -548,7 +634,7 @@ class PopulationContinuousMC(ContinuousMC):
             jax.nn.softplus: lambda x: jnp.log(jnp.exp(x) - 1.0),
         }
 
-        analytical_inv = INVERSE_FUNCS.get(inverse_link_function, None)
+        analytical_inv = INVERSE_FUNCS.get(self.inverse_link_function, None)
         _, spikes_per_neuron = jnp.unique(y[1], return_counts=True)
 
         return jnp.atleast_1d(analytical_inv(spikes_per_neuron / self.recording_time.tot_length()))
@@ -559,9 +645,7 @@ class PopulationContinuousMC(ContinuousMC):
             y: jnp.ndarray
     ) -> Tuple[Union[dict, jnp.ndarray], jnp.ndarray]:
         # set initial intercept as the inverse of firing rate
-        initial_intercept = self._initialize_intercept_matching_mean_rate(
-            self.observation_model.inverse_link_function, y
-        )
+        initial_intercept = self._initialize_intercept_matching_mean_rate(y)
         # get coef dimensions
         n_features = len(jnp.unique(X[1])) * self.observation_model.n_basis_funcs
         n_neurons = len(jnp.unique(y[1]))
@@ -582,6 +666,7 @@ class ContinuousPA(ContinuousMC):
             approx_interval,
             regularizer: Union[str, Regularizer] = "UnRegularized",
             regularizer_strength: Optional[float] = None,
+            inverse_link_function: Optional[Callable] = None,
             solver_name: str = None,
             solver_kwargs: dict = None,
             reset_suff_stats = True,
@@ -591,6 +676,7 @@ class ContinuousPA(ContinuousMC):
             recording_time=recording_time,
             regularizer=regularizer,
             regularizer_strength=regularizer_strength,
+            inverse_link_function=inverse_link_function,
             solver_name=solver_name,
             solver_kwargs=solver_kwargs,
         )
@@ -604,6 +690,7 @@ class ContinuousPA(ContinuousMC):
         self.T = None
         self.max_window = None
 
+        self.inverse_link_function = inverse_link_function
         self.approx_interval = approx_interval
         self.recording_time = recording_time
         self.observation_model = observation_model
@@ -612,6 +699,7 @@ class ContinuousPA(ContinuousMC):
 
     def _set_regularizer_strength(self):
         if self.regularizer_strength is not None and isinstance(self.regularizer, UnRegularized):
+            print(self.regularizer_strength)
             warnings.warn(
                 UserWarning(
                     "Unused parameter `regularizer_strength` for UnRegularized GLM. "
@@ -632,7 +720,9 @@ class ContinuousPA(ContinuousMC):
     ) -> jnp.ndarray:
         """Loss function for a given model to be optimized over."""
 
-        neg_ll = self.observation_model._negative_log_likelihood(X, y, params=params, approx_interval=self.approx_interval)
+        neg_ll = self.observation_model._negative_log_likelihood(X, y, params=params, approx_interval=self.approx_interval,
+                                                                 inverse_link_function=self.inverse_link_function,
+                                                                 )
 
         return neg_ll
 
@@ -641,6 +731,7 @@ class ContinuousPA(ContinuousMC):
             X: DESIGN_INPUT_TYPE,
             y: jnp.ndarray,
             init_params,
+            cast_to_jax_and_drop_nans: bool = False,
     ) -> Union[Any, NamedTuple]:
         """Initialize the state of the solver for running fit and update."""
         # set data dependent parameters
@@ -674,11 +765,11 @@ class ContinuousPA(ContinuousMC):
                 self.regularizer.mask = jnp.ones_like(init_params[0])
 
         # this should do nothing
-        opt_solver_kwargs = self.optimize_solver_params(data, y)
+        opt_solver_kwargs = self._optimize_solver_params(data, y)
 
         self.instantiate_solver(solver_kwargs=opt_solver_kwargs)
 
-        opt_state = self._solver_init_state(init_params, aux=None, X=data, y=y)
+        opt_state = self._solver_init_state(init_params, data, y)
 
         return opt_state
 
@@ -706,7 +797,7 @@ class ContinuousPA(ContinuousMC):
 
         self.initialize_state(data, y, init_params)
 
-        params, state = self._solver_run(init_params, aux=None, X=data, y=y)
+        params, state = self._solver_run(init_params, data, y)
 
         if tree_utils.pytree_map_and_reduce(
                 lambda x: jnp.any(jnp.isnan(x)), any, params
@@ -754,7 +845,7 @@ class ContinuousPA(ContinuousMC):
         self._check_input_dimensionality(X, y)
 
         # perform a one-step update
-        opt_step = self._solver_update(params, opt_state, aux=None, X=data, y=y, *args, **kwargs)
+        opt_step = self._solver_update(params, opt_state, data, y, *args, **kwargs)
 
         if tree_utils.pytree_map_and_reduce(
                 lambda x: jnp.any(jnp.isnan(x)), any, opt_step[0]
@@ -772,10 +863,10 @@ class ContinuousPA(ContinuousMC):
         return opt_step
 
     def fit_closed_form(self, X, y):
-        if self.observation_model.inverse_link_function is not jnp.exp:
+        if self.inverse_link_function is not jnp.exp:
             raise ValueError(
                 f"Closed form solution requires exponential inverse link function, "
-                f"the inverse link provided is {self.observation_model.inverse_link_function}!"
+                f"the inverse link provided is {self.inverse_link_function}!"
             )
 
         if not isinstance(self.regularizer, (UnRegularized, Ridge)):
@@ -854,6 +945,7 @@ class PopulationContinuousPA(ContinuousPA):
             approx_interval,
             regularizer: Union[str, Regularizer] = "UnRegularized",
             regularizer_strength: Optional[float] = None,
+            inverse_link_function: Optional[Callable] = None,
             solver_name: str = None,
             solver_kwargs: dict = None,
             reset_suff_stats=True,
@@ -864,6 +956,7 @@ class PopulationContinuousPA(ContinuousPA):
             approx_interval=approx_interval,
             regularizer=regularizer,
             regularizer_strength=regularizer_strength,
+            inverse_link_function=inverse_link_function,
             solver_name=solver_name,
             solver_kwargs=solver_kwargs,
             reset_suff_stats=reset_suff_stats,
@@ -878,6 +971,7 @@ class PopulationContinuousPA(ContinuousPA):
         self.T = None
         self.max_window = None
 
+        self.inverse_link_function = inverse_link_function
         self.recording_time = recording_time
         self.observation_model = observation_model
 
@@ -968,7 +1062,6 @@ class PopulationContinuousPA(ContinuousPA):
 
     def _initialize_intercept_matching_mean_rate(
             self,
-            inverse_link_function: Callable,
             y: jnp.ndarray,
     ) -> jnp.ndarray:
 
@@ -977,7 +1070,7 @@ class PopulationContinuousPA(ContinuousPA):
             jax.nn.softplus: lambda x: jnp.log(jnp.exp(x) - 1.0),
         }
 
-        analytical_inv = INVERSE_FUNCS.get(inverse_link_function, None)
+        analytical_inv = INVERSE_FUNCS.get(self.inverse_link_function, None)
         _, spikes_per_neuron = jnp.unique(y[1], return_counts=True)
 
         return jnp.atleast_1d(analytical_inv(spikes_per_neuron / self.recording_time.tot_length()))
@@ -988,9 +1081,7 @@ class PopulationContinuousPA(ContinuousPA):
             y: jnp.ndarray
     ) -> Tuple[Union[dict, jnp.ndarray], jnp.ndarray]:
         # set initial intercept as the inverse of firing rate
-        initial_intercept = self._initialize_intercept_matching_mean_rate(
-            self.observation_model.inverse_link_function, y
-        )
+        initial_intercept = self._initialize_intercept_matching_mean_rate(y)
         # get coef dimensions
         n_features = len(jnp.unique(X[1])) * self.observation_model.n_basis_funcs
         n_neurons = len(jnp.unique(y[1]))

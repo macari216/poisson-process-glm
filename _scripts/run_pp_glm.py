@@ -92,7 +92,6 @@ approx_interval = [
 # initialize PA-c observation model (computes sufficient statistics)
 # Here we apply Ridge regularization to reduce approximation error
 obs_model_pa = PolynomialApproximation(
-    inverse_link_function=phi,
     n_basis_funcs=n_basis_funcs,
     n_batches_scan=1,
     n_batches_pa=1,
@@ -108,6 +107,7 @@ model_pa = ContinuousPA(
     regularizer="Ridge",
     regularizer_strength = 100,
     observation_model=obs_model_pa,
+    inverse_link_function=phi,
     approx_interval=approx_interval,
     recording_time=nap.IntervalSet(0, sim_time),
     reset_suff_stats=True,
@@ -131,7 +131,6 @@ print("fitting MC model...")
 # initialize MC observation model (computes nll)
 # draw 500,000 MC samples per gradient step
 obs_model_mc = MonteCarloApproximation(
-    inverse_link_function=phi,
     n_basis_funcs=n_basis_funcs,
     n_batches_scan=1,
     history_window=history_window,
@@ -146,6 +145,7 @@ model_mc = ContinuousMC(
     solver_name="GradientDescent",
     observation_model=obs_model_mc,
     recording_time=nap.IntervalSet(0, sim_time),
+    inverse_link_function=phi,
     random_key=jax.random.PRNGKey(0),
     solver_kwargs={"has_aux": True, "acceleration": False, "stepsize": -1})
 params = model_mc.initialize_params(X_spikes, y_spikes)
@@ -176,6 +176,7 @@ print("fitting hybrid model...")
 model_h = ContinuousMC(
     solver_name="GradientDescent",
     observation_model=obs_model_mc,
+    inverse_link_function=phi,
     recording_time=nap.IntervalSet(0, sim_time),
     random_key=jax.random.PRNGKey(0),
     solver_kwargs={"has_aux": True, "acceleration": False, "stepsize": -1})
