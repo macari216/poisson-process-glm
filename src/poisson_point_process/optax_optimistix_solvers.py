@@ -2,6 +2,9 @@
 
 from typing import Any, Callable, ClassVar
 
+import jax
+import jax.numpy as jnp
+
 import equinox as eqx
 import optax
 import optimistix as optx
@@ -81,7 +84,7 @@ class OptimistixOptaxAdamReduceOnPlateau(AbstractOptimistixOptaxSolver):
             **solver_init_kwargs,
         )
 
-class OptimistixOptaxProximalAdamReduceOnPlateau(AbstractOptimistixOptaxSolver):
+class OptimistixOptaxStochasticProximalAdamRoP(AbstractOptimistixOptaxSolver):
     """
     Implementation of ADAM with reduce-on-plateau lr schedule using optax.chain wrapped by optimistix.OptaxMinimiser.
     Applies proximal operator after the ADAM update.
@@ -115,8 +118,15 @@ class OptimistixOptaxProximalAdamReduceOnPlateau(AbstractOptimistixOptaxSolver):
         **solver_init_kwargs,
 
     ):
+
+        self.mask = self.create_mask()
+
+        base_optimizer = optax.adam(stepsize)
+        masked_optimizer = optax.masked(base_optimizer, self.mask)
+
         _adam_rop = optax.chain(
-            optax.adam(stepsize),
+            masked_optimizer,
+            self.split_key_transform(),
             contrib.reduce_on_plateau(
                 patience=patience,
                 cooldown=cooldown,
@@ -137,6 +147,30 @@ class OptimistixOptaxProximalAdamReduceOnPlateau(AbstractOptimistixOptaxSolver):
             maxiter=maxiter,
             **solver_init_kwargs,
         )
+
+    # this should know how many params there are?
+    def create_mask(self):
+        mask = {
+            'coef': True,
+            'intercept': True,
+            'key': False
+        }
+
+        return mask
+
+    # Custom transform that splits the key
+    def split_key_transform(self):
+        def init_fn(params):
+            return {}  # no state needed
+
+        def update_fn(updates, state, params):
+            # Split the key in params and put the new key in updates
+            if params is not None and 'key' in params:
+                new_key, _ = jax.random.split(params['key'].astype(jnp.uint32))
+                updates = {**updates, 'key': new_key - params['key']}  # delta update
+            return updates, state
+
+        return optax.GradientTransformation(init_fn, update_fn)
 
     def get_learning_rate(self, state: optx._solver.optax._OptaxState) -> float:
         """

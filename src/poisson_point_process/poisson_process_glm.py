@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
-from typing import Any, Callable, NamedTuple, Optional, Tuple, Union
+from typing import Any, Callable, NamedTuple, Optional, Tuple, Union, Dict
 from numpy.typing import ArrayLike
 
 import jax
@@ -182,21 +182,40 @@ class ContinuousMC(BaseRegressor):
         self.coef_: DESIGN_INPUT_TYPE = params[0]
         self.intercept_: jnp.ndarray = params[1]
 
+    # def _predict_and_compute_loss(
+    #         self,
+    #         params: Tuple[DESIGN_INPUT_TYPE, jnp.ndarray],
+    #         X: DESIGN_INPUT_TYPE,
+    #         y: jnp.ndarray,
+    #         aux: Optional,
+    # ) -> Tuple:
+    #     """Loss function for a given model to be optimized over."""
+    #
+    #     new_key, subkey = jax.random.split(aux[0])
+    #
+    #     neg_ll = self.observation_model._negative_log_likelihood(X, y, self.inverse_link_function,
+    #                                                                        params, subkey)
+    #
+    #     return neg_ll, (new_key,)
+
     def _predict_and_compute_loss(
             self,
-            params: Tuple[DESIGN_INPUT_TYPE, jnp.ndarray],
+            params_with_key: Dict,
             X: DESIGN_INPUT_TYPE,
             y: jnp.ndarray,
             aux: Optional,
     ) -> Tuple:
         """Loss function for a given model to be optimized over."""
 
-        new_key, subkey = jax.random.split(aux[0])
+        params = {k: v for k, v in params_with_key.items() if k != 'key'}
+        key = params_with_key['key'].astype(jnp.uint32)
+
+        new_key, _ = jax.random.split(key)
 
         neg_ll = self.observation_model._negative_log_likelihood(X, y, self.inverse_link_function,
-                                                                           params, subkey)
+                                                                           params, new_key)
 
-        return neg_ll, (new_key,)
+        return neg_ll
 
     def get_optimal_solver_params_config(self):
         """Return the functions for computing default step and batch size for the solver."""
