@@ -14,6 +14,8 @@ from poisson_point_process.basis import GenLaguerreEval, GenLaguerreInt, GenLagu
 from poisson_point_process.poisson_process_glm import ContinuousPA, ContinuousMC
 from poisson_point_process.poisson_process_obs_model import PolynomialApproximation, MonteCarloApproximation
 
+import matplotlib.pyplot as plt
+
 jax.config.update("jax_enable_x64", True)
 
 #### EXAMPLE CODE FOR FITTING A SINGLE POSTSYNAPTIC NEURON
@@ -24,7 +26,7 @@ print("JAX is using:", jax.default_backend())
 
 ## generate data from all-to-one coupled GLM
 n_neurons = 8
-sim_time = 300
+sim_time = 500
 history_window = 0.005
 # required for simulation
 binsize = 0.00005
@@ -56,7 +58,7 @@ posts_rate_hz = 2
 # inverse firing rate per bin
 bias_true = phi_inverse(posts_rate_hz * binsize)
 # generative weights
-weights_true = np.random.normal(0.1, 0.5, n_neurons * n_basis_funcs)
+weights_true = np.random.normal(-0.2, 0.5, n_neurons * n_basis_funcs)
 
 # true filters in Hz
 filters_true = phi(np.dot(weights_true.reshape(-1,n_basis_funcs), kernels.T) + bias_true) / binsize
@@ -134,7 +136,7 @@ obs_model_mc = MonteCarloApproximation(
     n_basis_funcs=n_basis_funcs,
     n_batches_scan=1,
     history_window=history_window,
-    mc_n_samples=int(5e5),
+    M_samples=int(5e5),
     eval_function=basis_fn,
     int_function=int_fn,
     control_var=True,
@@ -142,23 +144,16 @@ obs_model_mc = MonteCarloApproximation(
 
 # initialize MC model
 model_mc = ContinuousMC(
-    solver_name="GradientDescent",
+    solver_name="ProxStochasticAdamRoP",
     observation_model=obs_model_mc,
     recording_time=nap.IntervalSet(0, sim_time),
     inverse_link_function=phi,
     random_key=jax.random.PRNGKey(0),
-    solver_kwargs={"has_aux": True, "acceleration": False, "stepsize": -1})
-params = model_mc.initialize_params(X_spikes, y_spikes)
-state = model_mc.initialize_state(X_spikes, y_spikes, params)
+    solver_kwargs={"stepsize": 1e-4}
+    )
 
-# fit MC model
-# record gradient step norm
-num_iter = 100
 tt0 = perf_counter()
-error_mc = np.zeros(num_iter)
-for step in range(num_iter):
-    params, state = model_mc.update(params, state, X_spikes, y_spikes)
-    error_mc[step] = state.error
+model_mc.fit(X_spikes, y_spikes)
 time_mc = perf_counter() - tt0
 print(f"MC fit time: {time_mc}")
 
@@ -174,23 +169,17 @@ print("fitting hybrid model...")
 # initialize hybrid model
 # models parameters are initializes at the PA estimate
 model_h = ContinuousMC(
-    solver_name="GradientDescent",
+    solver_name="StochasticAdamRoP",
     observation_model=obs_model_mc,
     inverse_link_function=phi,
     recording_time=nap.IntervalSet(0, sim_time),
     random_key=jax.random.PRNGKey(0),
-    solver_kwargs={"has_aux": True, "acceleration": False, "stepsize": -1})
-pa_params = (model_pa.coef_.squeeze(), jnp.atleast_1d(model_pa.intercept_))
-params_h = model_h.initialize_params(X_spikes, y_spikes, init_params=pa_params)
-state_h = model_h.initialize_state(X_spikes, y_spikes, params_h)
+    solver_kwargs={"stepsize": 1e-4}
+)
 
-# fit hybrid model
-num_iter = 100
 tt0 = perf_counter()
-error_h = np.zeros(num_iter)
-for step in range(num_iter):
-    params_h, state_h = model_h.update(params_h, state_h, X_spikes, y_spikes)
-    error_h[step] = state_h.error
+pa_params = (model_pa.coef_.squeeze(), jnp.atleast_1d(model_pa.intercept_))
+model_h.fit(X_spikes, y_spikes, init_params=pa_params)
 time_h = perf_counter() - tt0
 print(f"Hybrid fit time: {time_h}")
 
@@ -216,13 +205,11 @@ results = {
         "fit_time": time_mc,
         "filters": filters_mc,
         "mse": mse_mc,
-        "error": error_mc,
     },
     "hybrid": {
         "fit_time": time_h,
         "filters": filters_h,
         "mse": mse_h,
-        "error": error_h,
     },
     "true": {
         "filters": filters_true,

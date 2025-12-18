@@ -23,18 +23,20 @@ jax.config.update("jax_enable_x64", True)
 print("JAX is using:", jax.default_backend())
 
 ## generate data from all-to-all coupled GLM
+np.random.seed(216)
+
 n_neurons = 8
 sim_time = 300
 history_window = 0.005
 # required for simulation
-binsize = 0.00005
+binsize = 0.0001
 n_bins_tot = int(sim_time/binsize)
 window_size = int(history_window/binsize)
 
 # create a set of basis functions
 n_basis_funcs = 4
 basis_fn = GenLaguerreEval(history_window, n_basis_funcs)
-time = jnp.linspace(0,history_window,100)
+time = jnp.linspace(0, history_window, window_size)
 kernels = basis_fn(-time)
 int_fn = GenLaguerreInt(history_window, n_basis_funcs)
 prod_int_fn = GenLaguerreProdIntegral(history_window, n_basis_funcs)
@@ -55,10 +57,10 @@ baseline_fr = jnp.array(np.random.normal(3,1, n_neurons))
 # inverse firing rate per bin
 bias_true = phi_inverse(baseline_fr * binsize)
 # generative weights
-weights_true = np.random.normal(0.1, 0.5, (n_neurons * n_basis_funcs, n_neurons))
+weights_true = np.random.normal(-0.2, 0.5, (n_neurons * n_basis_funcs, n_neurons))
 # force post-spike filters to be negative
 for t, n in enumerate(range(0, weights_true.shape[0], n_basis_funcs)):
-    weights_true[n:n+n_basis_funcs, t] = np.random.normal(-0.2,0.05,4)
+    weights_true[n:n+n_basis_funcs, t] = np.random.normal(-0.2,0.05,n_basis_funcs)
 
 # true filters in Hz
 filters_true = phi(
@@ -75,7 +77,6 @@ spike_counts, rates = simulate.poisson_counts_recurrent(n_bins_tot, n_neurons, w
 
 # step 2: convert to spike times
 spike_times, spike_ids = simulate.poisson_times(spike_counts, sim_time, binsize)
-
 
 # X_spikes contains all presynaptic spike times and corresponding neuron IDs
 X_spikes = jnp.vstack((spike_times, spike_ids))
@@ -148,7 +149,7 @@ obs_model_mc = MonteCarloApproximation(
     n_basis_funcs=n_basis_funcs,
     n_batches_scan=1,
     history_window=history_window,
-    mc_n_samples=int(5e5),
+    M_samples=int(5e5),
     eval_function=basis_fn,
     int_function=int_fn,
     control_var=True,
@@ -157,29 +158,20 @@ obs_model_mc = MonteCarloApproximation(
 # initialize MC model
 # NOTE that it uses a Population model class
 model_mc = PopulationContinuousMC(
-    solver_name="GradientDescent",
+    solver_name="StochasticAdamRoP",
     observation_model=obs_model_mc,
     inverse_link_function=phi,
     recording_time=nap.IntervalSet(0, sim_time),
     random_key=jax.random.PRNGKey(0),
-    solver_kwargs={"has_aux": True, "acceleration": False, "stepsize": -1})
-params = model_mc.initialize_params(X_spikes, y_spikes)
-state = model_mc.initialize_state(X_spikes, y_spikes, params)
-
-# fit MC model
-# record gradient step norm
-num_iter = 100
+    solver_kwargs={"stepsize": 1e-4, "tol": 1e-5})
 tt0 = perf_counter()
-error_mc = np.zeros(num_iter)
-for step in range(num_iter):
-    params, state = model_mc.update(params, state, X_spikes, y_spikes)
-    error_mc[step] = state.error
+model_mc.fit(X_spikes, y_spikes)
 time_mc = perf_counter() - tt0
 print(f"MC fit time: {time_mc}")
 
 # construct estimated filters, shape (pre, post, time)
 weights_mc, bias_mc = model_mc.coef_.reshape(n_neurons,n_basis_funcs,-1), model_mc.intercept_
-filters_mc = phi(np.einsum("ijk,tk->ijt", weights_mc, kernels) + bias_mc[None,:,None])
+filters_mc = phi(np.einsum("ikj,tk->ijt", weights_mc, kernels) + bias_mc[None,:,None])
 
 #compute MSE
 mse_mc = np.mean((filters_true - filters_mc) ** 2)
@@ -190,23 +182,16 @@ print("fitting hybrid model...")
 # NOTE that it uses a Population model class
 # models parameters are initializes at the PA estimate
 model_h = PopulationContinuousMC(
-    solver_name="GradientDescent",
+    solver_name="StochasticAdamRoP",
     observation_model=obs_model_mc,
     inverse_link_function=phi,
     recording_time=nap.IntervalSet(0, sim_time),
     random_key=jax.random.PRNGKey(0),
-    solver_kwargs={"has_aux": True, "acceleration": False, "stepsize": -1})
-pa_params = (model_pa.coef_.squeeze(), jnp.atleast_1d(model_pa.intercept_))
-params_h = model_h.initialize_params(X_spikes, y_spikes, init_params=pa_params)
-state_h = model_h.initialize_state(X_spikes, y_spikes, params_h)
+    solver_kwargs={"stepsize": 1e-4, "tol": 1e-5})
 
-# fit hybrid model
-num_iter = 100
 tt0 = perf_counter()
-error_h = np.zeros(num_iter)
-for step in range(num_iter):
-    params_h, state_h = model_h.update(params_h, state_h, X_spikes, y_spikes)
-    error_h[step] = state_h.error
+pa_params = (model_pa.coef_.squeeze(), jnp.atleast_1d(model_pa.intercept_))
+model_h.fit(X_spikes, y_spikes, init_params=pa_params)
 time_h = perf_counter() - tt0
 print(f"Hybrid fit time: {time_h}")
 
@@ -232,13 +217,11 @@ results = {
         "fit_time": time_mc,
         "filters": filters_mc,
         "mse": mse_mc,
-        "error": error_mc,
     },
     "hybrid": {
         "fit_time": time_h,
         "filters": filters_h,
         "mse": mse_h,
-        "error": error_h,
     },
     "true": {
         "filters": filters_true,
