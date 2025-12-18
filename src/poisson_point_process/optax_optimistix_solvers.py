@@ -20,16 +20,18 @@ from nemos.solvers._optimistix_solvers import (
     Params,
 )
 
-DEFAULT_ATOL = 1e-2
+DEFAULT_ATOL = 1e-6
 DEFAULT_RTOL = 0.0
 DEFAULT_MAX_STEPS = 100_000
 
 DEFAULT_PATIENCE = 5
 DEFAULT_COOLDOWN = 0
 DEFAULT_FACTOR = 0.5
-DEFAULT_ACCUMULATION_SIZE = 200
+DEFAULT_ACCUMULATION_SIZE = 100
+DEFAULT_ATOL_ROP = 0.0
+DEFAULT_RTOL_ROP = 1e-3
 
-class OptimistixOptaxAdamReduceOnPlateau(AbstractOptimistixOptaxSolver):
+class OptimistixOptaxStochasticAdamRoP(AbstractOptimistixOptaxSolver):
     """
     Implementation of ADAM with reduce-on-plateau lr schedule using optax.chain wrapped by optimistix.OptaxMinimiser.
 
@@ -57,17 +59,25 @@ class OptimistixOptaxAdamReduceOnPlateau(AbstractOptimistixOptaxSolver):
         cooldown: int = DEFAULT_COOLDOWN,
         factor: int = DEFAULT_FACTOR,
         accumulation_size: int = DEFAULT_ACCUMULATION_SIZE,
+        atol_rop: float = DEFAULT_ATOL_ROP,
+        rtol_rop: float = DEFAULT_RTOL_ROP,
         **solver_init_kwargs,
 
     ):
+        self.mask = self.create_mask()
+
+        base_optimizer = optax.adam(stepsize)
+        masked_optimizer = optax.masked(base_optimizer, self.mask)
 
         _adam_rop = optax.chain(
-            optax.adam(stepsize),
+            masked_optimizer,
+            self.split_key_transform(),
             contrib.reduce_on_plateau(
                 patience=patience,
                 cooldown=cooldown,
                 factor=factor,
-                rtol=rtol,
+                rtol=rtol_rop,
+                atol=atol_rop,
                 accumulation_size=accumulation_size,
             ),
         )
@@ -83,6 +93,28 @@ class OptimistixOptaxAdamReduceOnPlateau(AbstractOptimistixOptaxSolver):
             maxiter=maxiter,
             **solver_init_kwargs,
         )
+
+        # this should know how many params there are?
+
+    def create_mask(self):
+        mask = (True, True, False)
+
+        return mask
+
+        # Custom transform that splits the key
+
+    def split_key_transform(self):
+        def init_fn(params):
+            return {}  # no state needed
+
+        def update_fn(updates, state, params):
+            # Split the key in params and put the new key in updates
+            if params is not None and 'key' in params:
+                new_key, _ = jax.random.split(params['key'].astype(jnp.uint32))
+                updates = {**updates, 'key': new_key - params['key']}  # delta update
+            return updates, state
+
+        return optax.GradientTransformation(init_fn, update_fn)
 
 class OptimistixOptaxStochasticProximalAdamRoP(AbstractOptimistixOptaxSolver):
     """
@@ -115,11 +147,13 @@ class OptimistixOptaxStochasticProximalAdamRoP(AbstractOptimistixOptaxSolver):
         cooldown: int = DEFAULT_COOLDOWN,
         factor: int = DEFAULT_FACTOR,
         accumulation_size: int = DEFAULT_ACCUMULATION_SIZE,
+        atol_rop: float = DEFAULT_ATOL_ROP,
         **solver_init_kwargs,
 
     ):
 
         self.mask = self.create_mask()
+        self.base_stepsize = stepsize
 
         base_optimizer = optax.adam(stepsize)
         masked_optimizer = optax.masked(base_optimizer, self.mask)
@@ -132,6 +166,7 @@ class OptimistixOptaxStochasticProximalAdamRoP(AbstractOptimistixOptaxSolver):
                 cooldown=cooldown,
                 factor=factor,
                 rtol=rtol,
+                atol=atol_rop,
                 accumulation_size=accumulation_size,
             ),
         )
@@ -148,13 +183,8 @@ class OptimistixOptaxStochasticProximalAdamRoP(AbstractOptimistixOptaxSolver):
             **solver_init_kwargs,
         )
 
-    # this should know how many params there are?
     def create_mask(self):
-        mask = {
-            'coef': True,
-            'intercept': True,
-            'key': False
-        }
+        mask = (True, True, False)
 
         return mask
 
@@ -178,7 +208,7 @@ class OptimistixOptaxStochasticProximalAdamRoP(AbstractOptimistixOptaxSolver):
 
         This learning rate is either a static learning rate or was found by a linesearch.
         """
-        return state.opt_state[-1].learning_rate
+        return self.base_stepsize * state.opt_state[-1].scale
 
     def step(
         self,
