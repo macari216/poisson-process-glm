@@ -15,6 +15,8 @@ from poisson_point_process import poisson_process_obs_model as obs
 from poisson_point_process.base_regressor_PP import BaseRegressor
 from poisson_point_process.regularizer_PP import GroupLasso, UnRegularized, Ridge, Regularizer
 
+# from nemos.regularizer import GroupLasso, UnRegularized, Ridge, Regularizer
+
 from nemos import tree_utils, validation
 from nemos.pytrees import FeaturePytree
 from nemos.typing import DESIGN_INPUT_TYPE
@@ -34,7 +36,7 @@ class ContinuousMC(BaseRegressor):
             random_key: ArrayLike = jax.random.PRNGKey(0),
             regularizer: Union[str, Regularizer] = "UnRegularized",
             regularizer_strength: Optional[float] = None,
-            inverse_link_function: Optional[Callable] = None,
+            inverse_link_function: Optional[Callable] = jnp.exp,
             solver_name: str = None,
             solver_kwargs: dict = None,
     ):
@@ -57,7 +59,7 @@ class ContinuousMC(BaseRegressor):
         self.inverse_link_function = inverse_link_function
         self.recording_time = recording_time
         self.observation_model = observation_model
-        self.aux = (random_key,)
+        self.random_key = random_key
 
     @staticmethod
     def _check_params(
@@ -73,7 +75,7 @@ class ContinuousMC(BaseRegressor):
 
         """
         # check params has length two
-        validation.check_length(params, 2, "Params must have length two.")
+        validation.check_length(params, 3, "Params must have length three.")
         # convert to jax array (specify type if needed)
         params = validation.convert_tree_leaves_to_jax_array(
             params,
@@ -97,6 +99,16 @@ class ContinuousMC(BaseRegressor):
         if params[1].shape[0] != 1:
             raise ValueError(
                 "Intercept term should be a single valued one-dimensional array."
+            )
+        # check the dimensionality of random key
+        validation.check_tree_leaves_dimensionality(
+            params[2],
+            expected_dim=1,
+            err_message="params[2] must be of shape (2,)"
+        )
+        if params[2].shape[0] != 2:
+            raise ValueError(
+                "Random key must be a jax.random.PRNGKey() array."
             )
         return params
 
@@ -182,33 +194,19 @@ class ContinuousMC(BaseRegressor):
         self.coef_: DESIGN_INPUT_TYPE = params[0]
         self.intercept_: jnp.ndarray = params[1]
 
-    # def _predict_and_compute_loss(
-    #         self,
-    #         params: Tuple[DESIGN_INPUT_TYPE, jnp.ndarray],
-    #         X: DESIGN_INPUT_TYPE,
-    #         y: jnp.ndarray,
-    #         aux: Optional,
-    # ) -> Tuple:
-    #     """Loss function for a given model to be optimized over."""
-    #
-    #     new_key, subkey = jax.random.split(aux[0])
-    #
-    #     neg_ll = self.observation_model._negative_log_likelihood(X, y, self.inverse_link_function,
-    #                                                                        params, subkey)
-    #
-    #     return neg_ll, (new_key,)
-
     def _predict_and_compute_loss(
             self,
             params_with_key: Dict,
             X: DESIGN_INPUT_TYPE,
             y: jnp.ndarray,
-            aux: Optional,
     ) -> Tuple:
         """Loss function for a given model to be optimized over."""
 
-        params = {k: v for k, v in params_with_key.items() if k != 'key'}
-        key = params_with_key['key'].astype(jnp.uint32)
+        # params = {k: v for k, v in params_with_key.items() if k != 'key'}
+        # key = params_with_key['key'].astype(jnp.uint32)
+
+        params = params_with_key[:-1]
+        key = params_with_key[-1].astype(jnp.uint32)
 
         new_key, _ = jax.random.split(key)
 
@@ -244,7 +242,7 @@ class ContinuousMC(BaseRegressor):
             self,
             X: DESIGN_INPUT_TYPE,
             y: jnp.ndarray
-    ) -> Tuple[Union[dict, jnp.ndarray], jnp.ndarray]:
+    ) -> Tuple[Union[dict, jnp.ndarray], jnp.ndarray, jnp.ndarray]:
         # set initial intercept as the inverse of firing rate
         initial_intercept = self._initialize_intercept_matching_mean_rate(y)
         # get coef dimensions
@@ -254,6 +252,7 @@ class ContinuousMC(BaseRegressor):
         init_params = (
             jnp.zeros(n_neurons * self.observation_model.n_basis_funcs),
             initial_intercept,
+            self.random_key.astype(jnp.uint32)
         )
         return init_params
 
@@ -267,6 +266,9 @@ class ContinuousMC(BaseRegressor):
         if init_params is None:
             init_params = self._initialize_parameters(X, y)  # initialize
         else:
+            if len(init_params)==2:
+                init_params = init_params + (self.random_key.astype(jnp.uint32),)
+
             err_message = "Initial parameters must be array-like objects (or pytrees of array-like objects) "
             "with numeric data-type!"
             init_params = validation.convert_tree_leaves_to_jax_array(
@@ -327,7 +329,7 @@ class ContinuousMC(BaseRegressor):
         opt_solver_kwargs = self._optimize_solver_params(data, y)
 
         self.instantiate_solver(solver_kwargs=opt_solver_kwargs)
-        opt_state = self._solver_init_state(init_params, data, y, self.aux)
+        opt_state = self._solver_init_state(init_params, data, y)
 
         return opt_state
 
@@ -355,7 +357,7 @@ class ContinuousMC(BaseRegressor):
 
         self.initialize_state(X, y, init_params)
 
-        params, state = self._solver_run(init_params, data, y, self.aux)
+        params, state = self._solver_run(init_params, data, y)
 
         if tree_utils.pytree_map_and_reduce(
                 lambda x: jnp.any(jnp.isnan(x)), any, params
@@ -395,7 +397,7 @@ class ContinuousMC(BaseRegressor):
         self._check_input_dimensionality(X, y)
 
         # perform a one-step update
-        opt_step = self._solver_update(params, opt_state, data, y, self.aux, *args, **kwargs)
+        opt_step = self._solver_update(params, opt_state, data, y, *args, **kwargs)
 
         if tree_utils.pytree_map_and_reduce(
                 lambda x: jnp.any(jnp.isnan(x)), any, opt_step[0]
@@ -409,7 +411,6 @@ class ContinuousMC(BaseRegressor):
         # store params and state
         self._set_coef_and_intercept(opt_step[0])
         self.solver_state_ = opt_step[1]
-        self.aux = opt_step[1].aux
 
         return opt_step
 
@@ -577,7 +578,7 @@ class PopulationContinuousMC(ContinuousMC):
 
         """
         # check params has length two
-        validation.check_length(params, 2, "Params must have length two.")
+        validation.check_length(params, 3, "Params must have length three.")
         # convert to jax array (specify type if needed)
         params = validation.convert_tree_leaves_to_jax_array(
             params,
@@ -607,6 +608,16 @@ class PopulationContinuousMC(ContinuousMC):
                 "Inconsistent number of neurons. "
                 f"The intercept assumes {params[1].shape[0]} neurons, "
                 f"the coefficients {params[0].shape[1]} instead!"
+            )
+        # check the dimensionality of random key
+        validation.check_tree_leaves_dimensionality(
+            params[2],
+            expected_dim=1,
+            err_message="params[2] must be of shape (2,)"
+        )
+        if params[2].shape[0] != 2:
+            raise ValueError(
+                "Random key must be a jax.random.PRNGKey() array."
             )
         return params
 
@@ -662,7 +673,7 @@ class PopulationContinuousMC(ContinuousMC):
             self,
             X: DESIGN_INPUT_TYPE,
             y: jnp.ndarray
-    ) -> Tuple[Union[dict, jnp.ndarray], jnp.ndarray]:
+    ) -> Tuple[Union[dict, jnp.ndarray], jnp.ndarray, jnp.ndarray]:
         # set initial intercept as the inverse of firing rate
         initial_intercept = self._initialize_intercept_matching_mean_rate(y)
         # get coef dimensions
@@ -673,6 +684,7 @@ class PopulationContinuousMC(ContinuousMC):
         init_params = (
             jnp.zeros((n_features, n_neurons)),
             initial_intercept,
+            self.random_key.astype(jnp.uint32)
         )
         return init_params
 
@@ -730,12 +742,58 @@ class ContinuousPA(ContinuousMC):
         if self.regularizer_strength is None:
             self.regularizer_strength = 0
 
+    @staticmethod
+    def _check_params(
+            params: Tuple[Union[DESIGN_INPUT_TYPE, ArrayLike], ArrayLike],
+            data_type: Optional[jnp.dtype] = None,
+    ) -> Tuple[DESIGN_INPUT_TYPE, jnp.ndarray]:
+        """
+        Validate the dimensions and consistency of parameters.
+
+        This function checks the consistency of shapes and dimensions for model
+        parameters.
+        It ensures that the parameters and data are compatible for the model.
+
+        """
+        # check params has length two
+        validation.check_length(params, 2, "Params must have length two.")
+        # convert to jax array (specify type if needed)
+        params = validation.convert_tree_leaves_to_jax_array(
+            params,
+            "Initial parameters must be array-like objects (or pytrees of array-like objects) "
+            "with numeric data-type!",
+            data_type,
+        )
+
+        # check the dimensionality of coeff
+        validation.check_tree_leaves_dimensionality(
+            params[0],
+            expected_dim=2,
+            err_message="params[0] must be an array or nemos.pytree.FeaturePytree "
+                        "with array leafs of shape (n_features, n_neurons).",
+        )
+        # check the dimensionality of intercept
+        validation.check_tree_leaves_dimensionality(
+            params[1],
+            expected_dim=1,
+            err_message="params[1] must be of shape (n_neurons,) but "
+                        f"params[1] has {params[1].ndim} dimensions!",
+        )
+        if tree_utils.pytree_map_and_reduce(
+                lambda x: x.shape[1] != params[1].shape[0], all, params[0]
+        ):
+            raise ValueError(
+                "Inconsistent number of neurons. "
+                f"The intercept assumes {params[1].shape[0]} neurons, "
+                f"the coefficients {params[0].shape[1]} instead!"
+            )
+        return params
+
     def _predict_and_compute_loss(
             self,
             params: Tuple[DESIGN_INPUT_TYPE, jnp.ndarray],
             X: DESIGN_INPUT_TYPE,
             y: jnp.ndarray,
-            aux: Optional = None,
     ) -> jnp.ndarray:
         """Loss function for a given model to be optimized over."""
 
@@ -907,7 +965,7 @@ class ContinuousPA(ContinuousMC):
         # compute sufficient statistics
         self.observation_model._check_suff(X, self.reset_suff_stats)
 
-        params = self.observation_model._closed_form_solution(X, y, self.approx_interval, self.regularizer_strength)
+        params = self.observation_model._closed_form_solution(X, y, self.approx_interval, self.inverse_link_function, self.regularizer_strength)
 
         self._set_coef_and_intercept(params)
 

@@ -20,7 +20,7 @@ class MonteCarloApproximation(Observations):
             n_batches_scan,
             history_window,
             eval_function,
-            mc_n_samples=None,
+            M_samples=None,
             control_var=False,
             int_function=None,
     ):
@@ -39,7 +39,7 @@ class MonteCarloApproximation(Observations):
         self.history_window = history_window
         self.eval_function = eval_function
         # model specific
-        self.M = mc_n_samples
+        self.M_samples = M_samples
         self.int_function = int_function
         self.control_var = control_var
 
@@ -57,10 +57,10 @@ class MonteCarloApproximation(Observations):
         return jnp.append(Cj, jnp.array([self.T]))
 
     def build_sampling_grid(self):
-        dt = self.T / self.M
+        dt = self.T / self.M_samples
         starts, ends = self.recording_time.start, self.recording_time.end
         M_sub = jnp.floor((ends - starts) / dt).astype(int)
-        M_sub = M_sub.at[-1].set(self.M - jnp.sum(M_sub[:-1]))
+        M_sub = M_sub.at[-1].set(self.M_samples - jnp.sum(M_sub[:-1]))
         return jnp.concatenate([jnp.linspace(s + dt, e, m) - dt / 2 for s, e, m in zip(starts, ends, M_sub)])
 
     def _initialize_data_params(
@@ -123,7 +123,7 @@ class MonteCarloApproximation(Observations):
             )
             dts = spk_in_window[0] - i[0]
             lam_tilde = self.compute_lam_tilde(dts, weights[spk_in_window[1].astype(int)], bias)
-            lam_tilde_s += self.taylor_approx(lam_tilde, bias, inv_link_f=inverse_link_function)
+            lam_tilde_s += self.taylor_approx(lam_tilde, bias, inverse_link_function)
             lam_s += inverse_link_function(lam_tilde)
             return (lam_s, lam_tilde_s), lam_tilde
 
@@ -137,11 +137,11 @@ class MonteCarloApproximation(Observations):
         sub, _ = scan_vmap(padding[None, :])
         lam_tilde_v = jnp.concatenate(lam_tilde_v, axis=0)[:y.shape[1]]
         lam_v = inverse_link_function(lam_tilde_v)
-        lam_tilde_v = self.taylor_approx(lam_tilde_v, bias)
+        lam_tilde_v = self.taylor_approx(lam_tilde_v, bias, inverse_link_function)
         I_hat = (self.T / M) * (jnp.sum(out[0], axis=0) - jnp.sum(sub[0], axis=0))
         U_hat = (self.T / M) * (jnp.sum(out[1], axis=0) - jnp.sum(sub[1], axis=0))
         w = jnp.vstack((weights.reshape(-1, n_target), bias))
-        U = self.taylor_approx(jnp.dot(self.Cj, w), bias, self.T)
+        U = self.taylor_approx(jnp.dot(self.Cj, w), bias, inverse_link_function, t=self.T)
 
         cov = jnp.sum(
             (lam_v - jnp.mean(lam_v, axis=0)) * (lam_tilde_v - jnp.mean(lam_tilde_v, axis=0))
@@ -269,11 +269,11 @@ class MonteCarloApproximation(Observations):
             log=True
         )
 
-        mc_samples = self.draw_mc_sample(X, self.M, random_key)
+        mc_samples = self.draw_mc_sample(X, self.M_samples, random_key)
         mc_estimate = self.ll_function_MC(
             X,
             mc_samples,
-            self.M,
+            self.M_samples,
             params,
             inverse_link_function,
         )
