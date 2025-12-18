@@ -14,6 +14,8 @@ import jax.numpy as jnp
 import jaxopt
 from numpy.typing import NDArray
 
+import equinox as eqx
+
 from nemos import tree_utils
 from nemos.base_class import Base
 from nemos.proximal_operator import prox_group_lasso, prox_elastic_net
@@ -137,6 +139,8 @@ class UnRegularized(Regularizer):
         "ProximalGradient",
         "SVRG",
         "ProxSVRG",
+        # temporarily
+        "StochasticAdamRoP"
     )
 
     _default_solver = "GradientDescent"
@@ -186,6 +190,8 @@ class Ridge(Regularizer):
         "ProximalGradient",
         "SVRG",
         "ProxSVRG",
+        # temporarily
+        "StochasticAdamRoP"
     )
 
     _default_solver = "GradientDescent"
@@ -224,23 +230,6 @@ class Ridge(Regularizer):
         return tree_utils.pytree_map_and_reduce(
             lambda x: l2_penalty(x, params[1]), sum, params[0]
         )
-
-    # def penalized_loss(self, loss: Callable, regularizer_strength: float) -> Callable:
-    #     """Returns the penalized loss function for Ridge regularization."""
-    #
-    #     def _penalized_loss(params, X, y, aux=None):
-    #
-    #         loss_result = loss(params, X, y, aux)
-    #
-    #         if aux is not None:
-    #             model_loss, aux_out = loss_result
-    #             return model_loss + self._penalization(params, regularizer_strength), aux_out
-    #
-    #         else:
-    #             model_loss = loss_result
-    #             return model_loss + self._penalization(params, regularizer_strength)
-    #
-    #     return _penalized_loss
 
 
     def penalized_loss(self, loss: Callable, regularizer_strength: float) -> Callable:
@@ -292,6 +281,8 @@ class Lasso(Regularizer):
     _allowed_solvers = (
         "ProximalGradient",
         "ProxSVRG",
+        # temporarily
+        "ProxStochasticAdamRoP"
     )
 
     _default_solver = "ProximalGradient"
@@ -315,12 +306,15 @@ class Lasso(Regularizer):
         """
 
         def prox_op(params, l1reg, scaling=1.0):
-            Ws, bs = params
+            Ws, bs = params[0], params[1]
             l1reg /= bs.shape[0]
             # if Ws is a pytree, l1reg needs to be a pytree with the same
             # structure
             l1reg = jax.tree_util.tree_map(lambda x: l1reg * jnp.ones_like(x), Ws)
-            return jaxopt.prox.prox_lasso(Ws, l1reg, scaling=scaling), bs
+
+            Ws_new = jaxopt.prox.prox_lasso(Ws, l1reg, scaling=scaling)
+
+            return eqx.tree_at(lambda p: p[0], params, Ws_new)
 
         return prox_op
 
@@ -567,6 +561,8 @@ class GroupLasso(Regularizer):
     _allowed_solvers = (
         "ProximalGradient",
         "ProxSVRG",
+        # temporarily
+        "ProxStochasticAdamRoP"
     )
 
     _default_solver = "ProximalGradient"
