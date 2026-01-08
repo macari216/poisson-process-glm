@@ -286,6 +286,7 @@ class MonteCarloApproximation(Observations):
             self,
             X: Union[DESIGN_INPUT_TYPE, ArrayLike],
             params: Tuple[jnp.array, jnp.array],
+            inverse_link_function: Callable,
             bin_size: Optional = 0.001,
             time_int: Optional = None,
             n_batches_scan=1,
@@ -297,7 +298,7 @@ class MonteCarloApproximation(Observations):
                 X, t[-1].astype(int), self.max_window
             )
             dts = spk_in_window[0] - t[0]
-            pred_rate = self.inverse_link_function(self.compute_lam_tilde(dts, weights[spk_in_window[1].astype(int)], bias))
+            pred_rate = inverse_link_function(self.compute_lam_tilde(dts, weights[spk_in_window[1].astype(int)], bias))
             return None, pred_rate
 
         scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(int_f_scan, None, idxs), in_axes=0, out_axes=1)
@@ -801,7 +802,6 @@ class PolynomialApproximation(MonteCarloApproximation):
             mc_samples,
             M=int(3e6),
             params=params,
-            beta_old=0,
             inverse_link_function=inverse_link_function,
         )
 
@@ -813,7 +813,7 @@ class PolynomialApproximation(MonteCarloApproximation):
             self,
             X: Union[DESIGN_INPUT_TYPE, ArrayLike],
             params: Tuple[jnp.array, jnp.array],
-            inverse_link_function: Optional = None,
+            inverse_link_function: Callable,
             approx_interval: Optional = None,
             bin_size: Optional = 0.001,
             time_int: Optional = None,
