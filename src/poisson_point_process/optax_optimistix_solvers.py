@@ -24,7 +24,7 @@ DEFAULT_ATOL = 1e-6
 DEFAULT_RTOL = 0.0
 DEFAULT_MAX_STEPS = 100_000
 
-DEFAULT_PATIENCE = 5
+DEFAULT_PATIENCE = 15
 DEFAULT_COOLDOWN = 0
 DEFAULT_FACTOR = 0.5
 DEFAULT_ACCUMULATION_SIZE = 100
@@ -64,10 +64,9 @@ class OptimistixOptaxStochasticAdamRoP(AbstractOptimistixOptaxSolver):
         **solver_init_kwargs,
 
     ):
-        self.mask = self.create_mask()
 
         base_optimizer = optax.adam(stepsize)
-        masked_optimizer = optax.masked(base_optimizer, self.mask)
+        masked_optimizer = self.masked_optimizer_adaptive(base_optimizer)
 
         _adam_rop = optax.chain(
             masked_optimizer,
@@ -94,14 +93,21 @@ class OptimistixOptaxStochasticAdamRoP(AbstractOptimistixOptaxSolver):
             **solver_init_kwargs,
         )
 
-        # this should know how many params there are?
+    def masked_optimizer_adaptive(self, base_optimizer):
+        """A masked optimizer that automatically adapts to params length.
+        Assumes that random key is the last param."""
 
-    def create_mask(self):
-        mask = (True, True, False)
+        def init_fn(params):
+            mask = tuple([True] * (len(params) - 1) + [False])
+            masked_opt = optax.masked(base_optimizer, mask)
+            return masked_opt.init(params)
 
-        return mask
+        def update_fn(updates, state, params):
+            mask = tuple([True] * (len(params) - 1) + [False])
+            masked_opt = optax.masked(base_optimizer, mask)
+            return masked_opt.update(updates, state, params)
 
-        # Custom transform that splits the key
+        return optax.GradientTransformation(init_fn, update_fn)
 
     def split_key_transform(self):
         def init_fn(params):
@@ -109,9 +115,12 @@ class OptimistixOptaxStochasticAdamRoP(AbstractOptimistixOptaxSolver):
 
         def update_fn(updates, state, params):
             # Split the key in params and put the new key in updates
-            if params is not None and 'key' in params:
-                new_key, _ = jax.random.split(params['key'].astype(jnp.uint32))
-                updates = {**updates, 'key': new_key - params['key']}  # delta update
+            # this assumes that key exists
+            key = params[-1].astype(jnp.uint32)
+            new_key, _ = jax.random.split(key)
+            key_delta = new_key - key
+            updates = updates[:-1] + (key_delta,)
+
             return updates, state
 
         return optax.GradientTransformation(init_fn, update_fn)
