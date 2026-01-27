@@ -263,9 +263,11 @@ class Ridge(Regularizer):
         """
 
         def prox_op(params, l2reg, scaling=1.0):
-            Ws, bs = params
+            Ws, bs = params[:2]
             l2reg /= bs.shape[0]
-            return jaxopt.prox.prox_ridge(Ws, l2reg, scaling=scaling), bs
+            Ws_new = jaxopt.prox.prox_ridge(Ws, l2reg, scaling=scaling)
+            return eqx.tree_at(lambda p: p[0], params, Ws_new)
+            # return jaxopt.prox.prox_ridge(Ws, l2reg, scaling=scaling), bs
 
         return prox_op
 
@@ -684,8 +686,10 @@ class GroupLasso(Regularizer):
         """
 
         def prox_op(params, regularizer_strength, scaling=1.0):
-            return prox_group_lasso(
-                params, regularizer_strength, mask=self.mask, scaling=scaling
+            prox_on_w = prox_group_lasso(
+                params[:2], regularizer_strength, mask=self.mask, scaling=scaling
             )
+
+            return prox_on_w + params[2:]
 
         return prox_op
