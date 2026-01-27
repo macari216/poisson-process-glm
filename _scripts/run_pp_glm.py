@@ -144,7 +144,7 @@ obs_model_mc = MonteCarloApproximation(
 
 # initialize MC model
 model_mc = ContinuousMC(
-    solver_name="ProxStochasticAdamRoP",
+    solver_name="StochasticAdamRoP",
     observation_model=obs_model_mc,
     recording_time=nap.IntervalSet(0, sim_time),
     inverse_link_function=phi,
