@@ -888,7 +888,7 @@ class ContinuousPA(ContinuousMC):
         # compute sufficient statistics
         self.observation_model._check_suff(X, self.reset_suff_stats)
 
-        params = self.observation_model._closed_form_solution(X, y, self.approx_interval, self.regularizer_strength)
+        params = self.observation_model._closed_form_solution(X, y, self.approx_interval, self.inverse_link_function, self.regularizer_strength)
 
         self._set_coef_and_intercept(params)
 
