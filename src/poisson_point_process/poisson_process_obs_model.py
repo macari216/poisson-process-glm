@@ -323,6 +323,7 @@ class MonteCarloApproximation(Observations):
             y,
             scale: Union[float, jnp.ndarray] = 1.0,
             aggregate_sample_scores: Callable = jnp.mean,
+            inverse_link_function: Optional = None,
             params: Optional = None,
             random_key: Optional = None,
     ):
@@ -338,7 +339,7 @@ class MonteCarloApproximation(Observations):
         Returns:
             The log-likehood. Shape (1,).
         """
-        nll, _ = self._negative_log_likelihood(X, y, params, random_key)
+        nll = self._negative_log_likelihood(X, y, inverse_link_function, params, random_key)
         return -nll
 
     def sample_generator(

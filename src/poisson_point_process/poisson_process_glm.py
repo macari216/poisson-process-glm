@@ -252,7 +252,7 @@ class ContinuousMC(BaseRegressor):
         init_params = (
             jnp.zeros(n_neurons * self.observation_model.n_basis_funcs),
             initial_intercept,
-            self.random_key.astype(jnp.uint32)
+            self.random_key.astype(jnp.float64)
         )
         return init_params
 
@@ -267,7 +267,7 @@ class ContinuousMC(BaseRegressor):
             init_params = self._initialize_parameters(X, y)  # initialize
         else:
             if len(init_params)==2:
-                init_params = init_params + (self.random_key.astype(jnp.uint32),)
+                init_params = init_params + (self.random_key.astype(jnp.float64),)
 
             err_message = "Initial parameters must be array-like objects (or pytrees of array-like objects) "
             "with numeric data-type!"
@@ -684,7 +684,7 @@ class PopulationContinuousMC(ContinuousMC):
         init_params = (
             jnp.zeros((n_features, n_neurons)),
             initial_intercept,
-            self.random_key.astype(jnp.uint32)
+            self.random_key.astype(jnp.float64)
         )
         return init_params
 
