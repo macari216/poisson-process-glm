@@ -16,9 +16,7 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from nemos import solvers, utils, validation
-from poisson_point_process._regularizer_builder_PP import AVAILABLE_REGULARIZERS, instantiate_regularizer
 from nemos.base_class import Base
-from poisson_point_process.regularizer_PP import Regularizer
 from nemos.solvers._abstract_solver import SolverState, StepResult
 from nemos.typing import (
     DESIGN_INPUT_TYPE,
@@ -28,6 +26,10 @@ from nemos.typing import (
     SolverUpdate,
 )
 from nemos.utils import _flatten_dict, _get_name, _unpack_params, get_env_metadata
+
+from poisson_point_process._regularizer_builder_PP import AVAILABLE_REGULARIZERS, instantiate_regularizer
+from poisson_point_process.regularizer_PP import Regularizer
+from poisson_point_process._solver_registry import solver_registry
 
 
 def strip_metadata(arg_num: Optional[int] = None, kwarg_key: Optional[str] = None):
@@ -114,7 +116,7 @@ class BaseRegressor(Base, abc.ABC):
         if solver_kwargs is None:
             solver_kwargs = dict()
 
-        solver_class = solvers.solver_registry[self.solver_name]
+        solver_class = solver_registry[self.solver_name]
         self._check_solver_kwargs(solver_class, solver_kwargs)
 
         self.solver_kwargs = solver_kwargs
@@ -258,7 +260,7 @@ class BaseRegressor(Base, abc.ABC):
     def solver_kwargs(self, solver_kwargs: dict):
         """Setter for the solver_kwargs attribute."""
         if solver_kwargs:
-            solver_cls = solvers.solver_registry[self.solver_name]
+            solver_cls = solver_registry[self.solver_name]
             self._check_solver_kwargs(solver_cls, solver_kwargs)
         self._solver_kwargs = solver_kwargs
 
@@ -323,7 +325,7 @@ class BaseRegressor(Base, abc.ABC):
             solver_kwargs = deepcopy(self.solver_kwargs)
 
         # instantiate the solver
-        solver_cls = solvers.solver_registry[self.solver_name]
+        solver_cls = solver_registry[self.solver_name]
 
         self._check_solver_kwargs(solver_cls, solver_kwargs)
 
@@ -443,7 +445,7 @@ class BaseRegressor(Base, abc.ABC):
             )
 
     @abc.abstractmethod
-    def _predict_and_compute_loss(self, params, X, y, aux: Optional):
+    def _predict_and_compute_loss(self, params, X, y):
         """Loss function for a given model to be optimized over."""
         pass
 
