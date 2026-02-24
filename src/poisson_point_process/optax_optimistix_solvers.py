@@ -1,6 +1,6 @@
 """Solvers wrapping Optax solvers with Optimistix for use with NeMoS."""
 
-from typing import Any, ClassVar, Callable
+from typing import Any, ClassVar, Callable, TypeAlias
 
 import jax
 import jax.numpy as jnp
@@ -11,14 +11,10 @@ import optimistix as optx
 from optax import contrib
 
 from nemos.regularizer import Regularizer
-from nemos.typing import Pytree
+from nemos.typing import Pytree, Params, Aux
 
 from nemos.tree_utils import tree_sub
 from nemos.solvers._optax_optimistix_solvers import AbstractOptimistixOptaxSolver
-from nemos.solvers._optimistix_solvers import (
-    OptimistixStepResult,
-    Params,
-)
 
 DEFAULT_ATOL = 1e-6
 DEFAULT_RTOL = 0.0
@@ -30,6 +26,9 @@ DEFAULT_FACTOR = 0.5
 DEFAULT_ACCUMULATION_SIZE = 100
 DEFAULT_ATOL_ROP = 0.0
 DEFAULT_RTOL_ROP = 1e-3
+
+OptimistixSolverState: TypeAlias = eqx.Module
+OptimistixStepResult: TypeAlias = tuple[Params, OptimistixSolverState, Aux]
 
 
 class OptimistixOptaxStochasticAdamRoP(AbstractOptimistixOptaxSolver):
@@ -281,4 +280,4 @@ class OptimistixOptaxStochasticProximalAdamRoP(OptimistixOptaxStochasticAdamRoP)
 
         self.stats.update(solution.stats)
 
-        return solution.value, solution.state
+        return solution.value, solution.state, None
