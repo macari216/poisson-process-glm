@@ -135,9 +135,9 @@ class ContinuousMC(BaseRegressor):
                 expected_dim=2,
                 err_message="y must be two-dimensional, with shape (2, n_target_spikes).",
             )
-        if y.shape[0] != 3:
+        if jnp.all(y[1]) != 0:
             raise ValueError(
-                "y must have shape 3 at dimension 0 corresponding to postsynaptic spike times, neurons IDs and indices"
+                "y must contain a single neuron's spikes with neuron ID 0."
             )
 
         if y.shape[0] != 3:
@@ -398,6 +398,7 @@ class ContinuousMC(BaseRegressor):
 
         # perform a one-step update
         opt_step = self._solver_update(params, opt_state, data, y, *args, **kwargs)
+        print(opt_step[0])
 
         if tree_utils.pytree_map_and_reduce(
                 lambda x: jnp.any(jnp.isnan(x)), any, opt_step[0]
