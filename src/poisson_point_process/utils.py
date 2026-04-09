@@ -67,15 +67,37 @@ def compute_batch(range, n_spikes):
     return best_d
 
 @partial(jax.jit, static_argnums=1)
-def reshape_for_vmap(spikes, n_batches_scan):
-    padding_shape = (-spikes.shape[1] % n_batches_scan,)
-    padding = jnp.full((spikes.shape[0],) + padding_shape, spikes[:, :1])
-    shifted_spikes = jnp.hstack(
-        (spikes, padding)
-    )
-    shifted_spikes_array = shifted_spikes.reshape(spikes.shape[0],n_batches_scan,-1).transpose(2,1,0)
+def reshape_input_for_scan(times: jnp.ndarray, scan_size: int):
+    """
+        Reshape time series into scan inputs of equal size. Pad the last input with copies of
+        the last time point if needed.
 
-    return shifted_spikes_array, padding.transpose(1,0)
+        Parameters
+        ----------
+        times :
+            time series to scan over. Shape (n_channels, n_time_points)
+        scan_size :
+            the number of time points to process in each scan
+
+        Returns
+        -------
+        padded_times_reshaped :
+            Reshaped padded input. Shape (n_scans, scan_size, n_channels).
+        padding_value:
+            The last time point. Shape (n_channels,)
+        padding_len :
+            Number of padding time points appended to make n_points divisible by scan_size.
+    """
+    n_channels = times.shape[0]
+    padding_value = times[:, -1]
+    padding_len = -times.shape[1] % scan_size
+    padding = jnp.full((n_channels,) + (padding_len,), padding_value[:,None])
+    padded_spikes = jnp.hstack(
+        (times, padding)
+    )
+    padded_times_reshaped = padded_spikes.reshape(n_channels, scan_size,-1).transpose(2,1,0)
+
+    return padded_times_reshaped, padding_value, padding_len
 
 def concat_params(params):
     if len(params[0].shape) == 1:

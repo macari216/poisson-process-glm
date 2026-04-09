@@ -2,7 +2,6 @@ from typing import Callable, Optional, Union, Tuple
 from numpy.typing import ArrayLike
 
 import warnings
-from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -132,14 +131,17 @@ class MonteCarloApproximation(Observations):
             in_axes=0
         )
 
-        shifted_spikes_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
-        out, lam_tilde_v = scan_vmap(shifted_spikes_array)
-        sub, _ = scan_vmap(padding[None, :])
+        reshaped_spikes_array, padding_val, padding_len = utils.reshape_input_for_scan(y, self.n_batches_scan)
+        out, lam_tilde_v = scan_vmap(reshaped_spikes_array)
+
+        # compute padding contribution separately to subtract it
+        padding_contrib = scan_fn((jnp.zeros(n_target), jnp.zeros(n_target)), padding_val)[0]
+
         lam_tilde_v = jnp.concatenate(lam_tilde_v, axis=0)[:y.shape[1]]
         lam_v = inverse_link_function(lam_tilde_v)
         lam_tilde_v = self.taylor_approx(lam_tilde_v, bias, inverse_link_function)
-        I_hat = (self.T / M) * (jnp.sum(out[0], axis=0) - jnp.sum(sub[0], axis=0))
-        U_hat = (self.T / M) * (jnp.sum(out[1], axis=0) - jnp.sum(sub[1], axis=0))
+        I_hat = (self.T / M) * (jnp.sum(out[0], axis=0) - (padding_contrib[0]*padding_len))
+        U_hat = (self.T / M) * (jnp.sum(out[1], axis=0) - (padding_contrib[1]*padding_len))
         w = jnp.vstack((weights.reshape(-1, n_target), bias))
         U = self.taylor_approx(jnp.dot(self.Cj, w), bias, inverse_link_function, t=self.T)
 
@@ -180,15 +182,18 @@ class MonteCarloApproximation(Observations):
             )
             dts = spk_in_window[0] - i[0]
             lam_tilde = self.compute_lam_tilde(dts, weights[spk_in_window[1].astype(int)], bias)
-            lam_s += inverse_link_function(lam_tilde)
+            lam_s += inverse_link_function(lam_tilde).sum()
             return lam_s, None
 
-        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.zeros(n_target), idxs), in_axes=0)
+        scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.array(0), idxs), in_axes=0)
 
-        shifted_spikes_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
-        out, _ = scan_vmap(shifted_spikes_array)
-        sub, _ = scan_vmap(padding[None, :])
-        return (self.T / M) * (jnp.sum(out) - jnp.sum(sub))
+        reshaped_spikes_array, padding_val, padding_len = utils.reshape_input_for_scan(y, self.n_batches_scan)
+        out, _ = scan_vmap(reshaped_spikes_array)  # shape (n_scans,)
+
+        # compute padding contribution separately to subtract it
+        padding_contrib = scan_fn(jnp.array(0.), padding_val)[0] * padding_len
+
+        return (self.T / M) * (jnp.sum(out) - padding_contrib)
 
     def compute_summed_ll(
             self,
@@ -233,10 +238,13 @@ class MonteCarloApproximation(Observations):
 
         scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_fn, jnp.array(0), idxs), in_axes=0)
 
-        shifted_spikes_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
-        out, _ = scan_vmap(shifted_spikes_array)
-        sub, _ = scan_vmap(padding[None, :])
-        return jnp.sum(out) - jnp.sum(sub)
+        reshaped_spikes_array, padding_val, padding_len = utils.reshape_input_for_scan(y, self.n_batches_scan)
+        out, _ = scan_vmap(reshaped_spikes_array)  # shape (n_scans,)
+
+        # compute padding contribution separately to subtract it
+        padding_contrib = scan_fn(jnp.array(0.), padding_val)[0] * padding_len
+
+        return jnp.sum(out) - padding_contrib
 
     def _negative_log_likelihood(
             self,
@@ -313,8 +321,13 @@ class MonteCarloApproximation(Observations):
 
         bin_times = jnp.linspace(start + bin_size, end, int(duration / bin_size)) - bin_size / 2
         bin_idx = jnp.searchsorted(X[0], bin_times, "right")
-        bin_array, _ = utils.reshape_for_vmap(jnp.vstack((bin_times, bin_idx)), int(n_batches_scan))
-        _, out = scan_vmap(bin_array)
+
+        reshaped_bin_array, _, _ = utils.reshape_input_for_scan(
+            jnp.vstack((bin_times, bin_idx)),
+            self.n_batches_scan
+        )
+        _, out = scan_vmap(reshaped_bin_array)
+
         return out.reshape(-1, n_target).squeeze()[:bin_times.size]
 
     def log_likelihood(
@@ -577,10 +590,17 @@ class PolynomialApproximation(MonteCarloApproximation):
             lambda idxs: jax.lax.scan(scan_fn, jnp.zeros((n_features, n_features)), idxs),
             in_axes=0
         )
-        post_idx_array, padding = utils.reshape_for_vmap(X[:, self.max_window:], self.n_batches_pa)
-        out, _ = scan_vmap(post_idx_array)
-        sub, _ = scan_vmap(padding[None, :])
-        M_int = jnp.sum(out, 0) - jnp.sum(sub, 0)
+
+        post_idx_array, padding_val, padding_len = utils.reshape_input_for_scan(
+            X[:, self.max_window:],
+            self.n_batches_scan
+        )
+        out, _ = scan_vmap(post_idx_array)  # shape (n_scans,)
+
+        # compute padding contribution separately to subtract it
+        padding_contrib = scan_fn(jnp.zeros((n_features, n_features)), padding_val)[0] * padding_len
+
+        M_int = jnp.sum(out, 0) - padding_contrib
         return M_int
 
     def compute_M(
@@ -688,11 +708,11 @@ class PolynomialApproximation(MonteCarloApproximation):
         k_init = jnp.zeros((n_neurons, self.n_basis_funcs, n_target))
 
         scan_vmap = jax.vmap(lambda idxs: jax.lax.scan(scan_k, k_init, idxs), in_axes=0)
-        target_idx_array, padding = utils.reshape_for_vmap(y, self.n_batches_scan)
+        target_idx_array, padding_val, padding_len = utils.reshape_input_for_scan(y, self.n_batches_scan)
         out, _ = scan_vmap(target_idx_array)
-        sub, _ = scan_vmap(padding[:, None])
+        padding_contrib = scan_k(k_init, padding_val)[0] * padding_len
 
-        k = jnp.sum(out, 0).reshape(-1, n_target) - jnp.sum(sub, 0).reshape(-1, n_target)
+        k = jnp.sum(out, 0).reshape(-1, n_target) - padding_contrib.reshape(-1, n_target)
 
         return jnp.vstack((k, spikes_n[None, :]))
 
@@ -843,6 +863,9 @@ class PolynomialApproximation(MonteCarloApproximation):
 
         bin_times = jnp.linspace(start+bin_size, end, int(duration / bin_size)) - bin_size / 2
         bin_idx = jnp.searchsorted(X[0], bin_times, "right")
-        bin_array, _ = utils.reshape_for_vmap(jnp.vstack((bin_times, bin_idx)), int(n_batches_scan))
-        _, out = scan_vmap(bin_array)
+        reshaped_bin_array, _, _ = utils.reshape_input_for_scan(
+            jnp.vstack((bin_times, bin_idx)),
+            self.n_batches_scan
+        )
+        _, out = scan_vmap(reshaped_bin_array)
         return out.reshape(-1, n_target).squeeze()[:bin_times.size]
