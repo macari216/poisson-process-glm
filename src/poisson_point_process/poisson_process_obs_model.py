@@ -260,6 +260,8 @@ class MonteCarloApproximation(Observations):
 
         $\sum_{k=1}^K \log \lambda(y_k) - \frac{T}{M} \sum_{m=1}^M \lambda(\tau_m)$
 
+        computes mean LL / spike for stability and scaling
+
         Parameters:
             X: (2, S) the spike time data
             y: (2, S) postsynaptic spike times and insertion indices
@@ -286,9 +288,9 @@ class MonteCarloApproximation(Observations):
             inverse_link_function,
         )
 
-        # jax.debug.print("int {}, log lam {}", mc_estimate, log_lam_y)
+        n_spikes = y.shape[1]
 
-        return mc_estimate - log_lam_y
+        return (mc_estimate - log_lam_y) / n_spikes
 
     def _predict(
             self,
@@ -781,7 +783,9 @@ class PolynomialApproximation(MonteCarloApproximation):
 
         estimated_rate = self.integral_approximation(params, approx_interval, inverse_link_function)
 
-        return jnp.sum(estimated_rate) - log_lam_y
+        n_spikes = y.shape[1]
+
+        return (jnp.sum(estimated_rate) - log_lam_y) / n_spikes
 
     def log_likelihood(
             self,

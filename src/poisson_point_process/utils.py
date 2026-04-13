@@ -32,7 +32,8 @@ def compute_max_window_size(bounds, spike_times, all_spikes):
 
 @partial(jax.jit, static_argnums=2)
 def slice_array(array, i, window_size):
-    return jax.lax.dynamic_slice(array, (0,i - window_size), (2,window_size,))
+    n_channels = array.shape[0]
+    return jax.lax.dynamic_slice(array, (0,i - window_size), (n_channels,window_size,))
 
 @partial(jax.jit, static_argnums=2)
 def slice_array_batched(array, i, window_size):
