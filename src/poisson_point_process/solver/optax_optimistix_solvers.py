@@ -1,6 +1,8 @@
 """Solvers wrapping Optax solvers with Optimistix for use with NeMoS."""
 
-from typing import Any, ClassVar, Callable
+import abc
+import inspect
+from typing import Any, ClassVar, Callable, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -14,15 +16,13 @@ from nemos.regularizer import Regularizer
 from nemos.typing import Pytree
 
 from nemos.tree_utils import tree_sub
-from nemos.solvers._optax_optimistix_solvers import AbstractOptimistixOptaxSolver
-from nemos.solvers._optimistix_solvers import (
-    OptimistixStepResult,
-    Params,
+from ._optimistix_adapter import (
+    OptimistixAdapter,
 )
 
 DEFAULT_ATOL = 1e-6
 DEFAULT_RTOL = 0.0
-DEFAULT_MAX_STEPS = 100_000
+DEFAULT_MAX_STEPS = 10_000
 
 DEFAULT_PATIENCE = 15
 DEFAULT_COOLDOWN = 0
@@ -31,6 +31,51 @@ DEFAULT_ACCUMULATION_SIZE = 100
 DEFAULT_ATOL_ROP = 0.0
 DEFAULT_RTOL_ROP = 1e-3
 
+
+class AbstractOptimistixOptaxSolver(OptimistixAdapter, abc.ABC):
+    """Adapter for optimistix.OptaxMinimiser which is an adapter for Optax solvers."""
+
+    _solver_cls = optx.OptaxMinimiser
+    # if defined, the docstring is extended to include the documentation of the wrapped Optax solver
+    _optax_solver: ClassVar[Callable[..., optax.GradientTransformation]]
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+
+        # only append things if the _optax_solver class attribute is defined
+        if not hasattr(cls, "_optax_solver"):
+            return
+
+        doc_so_far = inspect.cleandoc(inspect.getdoc(cls))
+        # delete the part about OptaxMinimiser
+        doc_so_far = doc_so_far.split("\n\nOptaxMinimiser's documentation:", 1)[0]
+
+        init_header = inspect.cleandoc(f"More info from {cls.__name__}.__init__'s doc")
+        init_header += "\n" + "-" * len(init_header)
+        init_doc = inspect.cleandoc(
+            inspect.getdoc(cls.__init__)
+            or f"No documentation found for {cls.__name__}.init"
+        )
+        init_doc = init_header + "\n" + init_doc
+
+        optax_header = inspect.cleandoc(f"""
+            More info from Optax's {cls._optax_solver.__name__} documentation:
+            """)
+        optax_header += "\n" + "-" * len(optax_header)
+        optax_doc = inspect.cleandoc(
+            inspect.getdoc(cls._optax_solver) or "No documentation found in Optax."
+        )
+        optax_doc = optax_header + "\n" + optax_doc
+
+        full_doc = "\n\n".join(
+            (
+                doc_so_far,
+                init_doc,
+                optax_doc,
+            )
+        )
+
+        cls.__doc__ = inspect.cleandoc(full_doc)
 
 class OptimistixOptaxStochasticAdamRoP(AbstractOptimistixOptaxSolver):
     """
@@ -43,8 +88,9 @@ class OptimistixOptaxStochasticAdamRoP(AbstractOptimistixOptaxSolver):
     fun_with_aux: Callable
 
     # stats: dict[str, PyTree[ArrayLike]]
-    stats: dict[str, Pytree]
+    # stats: dict[str, Pytree]
 
+    _proximal: ClassVar[bool] = False
     _optax_solver = optax.chain
 
     def __init__(
@@ -92,6 +138,7 @@ class OptimistixOptaxStochasticAdamRoP(AbstractOptimistixOptaxSolver):
             tol=tol,
             rtol=rtol,
             maxiter=maxiter,
+            has_aux=False,
             **solver_init_kwargs,
         )
 
@@ -140,7 +187,7 @@ class OptimistixOptaxStochasticAdamRoP(AbstractOptimistixOptaxSolver):
     def step(
         self,
         fn: Callable,
-        y: Params,
+        y: Tuple,
         args: Pytree,
         options: dict[str, Any],
         state: optx._solver.optax._OptaxState,
@@ -167,6 +214,27 @@ class OptimistixOptaxStochasticAdamRoP(AbstractOptimistixOptaxSolver):
 
         return new_params, new_state, new_aux
 
+    def run(
+        self,
+        init_params: Tuple,
+        *args,
+    ):
+        solution = optx.minimise(
+            fn=self.fun,
+            solver=self,  # pyright: ignore
+            y0=init_params,
+            args=args,
+            options=self.config.options,
+            max_steps=self.config.maxiter,
+            adjoint=self.config.adjoint,
+            throw=self.config.throw,
+            tags=self.config.tags,
+        )
+
+        # self.stats.update(solution.stats)
+
+        return solution.value, solution.state
+
 class OptimistixOptaxStochasticProximalAdamRoP(OptimistixOptaxStochasticAdamRoP):
     """
     Implementation of ADAM with reduce-on-plateau lr schedule using optax.chain wrapped by optimistix.OptaxMinimiser.
@@ -180,7 +248,7 @@ class OptimistixOptaxStochasticProximalAdamRoP(OptimistixOptaxStochasticAdamRoP)
     prox: Callable
 
     # stats: dict[str, PyTree[ArrayLike]]
-    stats: dict[str, Pytree]
+    # stats: dict[str, Pytree]
 
     _optax_solver = optax.chain
     _proximal: ClassVar[bool] = True
@@ -224,7 +292,7 @@ class OptimistixOptaxStochasticProximalAdamRoP(OptimistixOptaxStochasticAdamRoP)
     def step(
         self,
         fn: Callable,
-        y: Params,
+        y: Tuple,
         args: Pytree,
         options: dict[str, Any],
         state: optx._solver.optax._OptaxState,
@@ -263,22 +331,21 @@ class OptimistixOptaxStochasticProximalAdamRoP(OptimistixOptaxStochasticAdamRoP)
 
     def run(
         self,
-        init_params: Params,
+        init_params: Tuple,
         *args,
-    ) -> OptimistixStepResult:
+    ):
         solution = optx.minimise(
             fn=self.fun,
             solver=self,  # pyright: ignore
             y0=init_params,
             args=args,
             options=self.config.options,
-            has_aux=self.config.has_aux,
             max_steps=self.config.maxiter,
             adjoint=self.config.adjoint,
             throw=self.config.throw,
             tags=self.config.tags,
         )
 
-        self.stats.update(solution.stats)
+        # self.stats.update(solution.stats)
 
         return solution.value, solution.state

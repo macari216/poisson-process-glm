@@ -163,7 +163,7 @@ model_mc = PopulationContinuousMC(
     inverse_link_function=phi,
     recording_time=nap.IntervalSet(0, sim_time),
     random_key=jax.random.PRNGKey(0),
-    solver_kwargs={"stepsize": 1e-4, "tol": 1e-5})
+    solver_kwargs={"stepsize": 1e-4, "tol": 1e-5, "maxiter": 200})
 tt0 = perf_counter()
 model_mc.fit(X_spikes, y_spikes)
 time_mc = perf_counter() - tt0
@@ -187,7 +187,7 @@ model_h = PopulationContinuousMC(
     inverse_link_function=phi,
     recording_time=nap.IntervalSet(0, sim_time),
     random_key=jax.random.PRNGKey(0),
-    solver_kwargs={"stepsize": 1e-4, "tol": 1e-5})
+    solver_kwargs={"stepsize": 1e-4, "tol": 1e-5, "maxiter": 200})
 
 tt0 = perf_counter()
 pa_params = (model_pa.coef_.squeeze(), jnp.atleast_1d(model_pa.intercept_))

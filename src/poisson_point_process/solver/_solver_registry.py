@@ -11,7 +11,7 @@ from nemos.solvers._jaxopt_solvers import (
 )
 from nemos.solvers._svrg import WrappedProxSVRG, WrappedSVRG
 
-from .optax_optimistix_solvers import OptimistixOptaxStochasticAdamRoP, OptimistixOptaxStochasticProximalAdamRoP
+from poisson_point_process.solver.optax_optimistix_solvers import OptimistixOptaxStochasticAdamRoP, OptimistixOptaxStochasticProximalAdamRoP
 
 solver_registry: dict[str, Type] = {
     "GradientDescent": JaxoptGradientDescent,

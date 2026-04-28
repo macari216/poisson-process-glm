@@ -15,12 +15,12 @@ import jax.numpy as jnp
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from nemos import solvers, utils, validation
+from nemos import utils
 from nemos.base_class import Base
 from nemos.solvers._abstract_solver import SolverState, StepResult
 from nemos.typing import (
     DESIGN_INPUT_TYPE,
-    RegularizerStrength,
+    # RegularizerStrength,
     SolverInit,
     SolverRun,
     SolverUpdate,
@@ -29,7 +29,7 @@ from nemos.utils import _flatten_dict, _get_name, _unpack_params, get_env_metada
 
 from poisson_point_process._regularizer_builder_PP import AVAILABLE_REGULARIZERS, instantiate_regularizer
 from poisson_point_process.regularizer_PP import Regularizer
-from poisson_point_process._solver_registry import solver_registry
+from poisson_point_process.solver._solver_registry import solver_registry
 
 
 def strip_metadata(arg_num: Optional[int] = None, kwarg_key: Optional[str] = None):
@@ -100,7 +100,7 @@ class BaseRegressor(Base, abc.ABC):
     def __init__(
         self,
         regularizer: Union[str, Regularizer] = "UnRegularized",
-        regularizer_strength: Optional[RegularizerStrength] = None,
+        regularizer_strength: Optional[float] = None,
         solver_name: Optional[str] = None,
         solver_kwargs: Optional[dict] = None,
     ):
@@ -229,14 +229,13 @@ class BaseRegressor(Base, abc.ABC):
             self.regularizer_strength = self._regularizer_strength
 
     @property
-    def regularizer_strength(self) -> RegularizerStrength:
+    def regularizer_strength(self) -> float:
         """Regularizer strength getter."""
         return self._regularizer_strength
 
     @regularizer_strength.setter
-    def regularizer_strength(self, strength: Union[None, RegularizerStrength]):
+    def regularizer_strength(self, strength: Union[None, float]):
         # check regularizer strength
-        strength = self.regularizer._validate_regularizer_strength(strength)
         self._regularizer_strength = strength
 
     @property
