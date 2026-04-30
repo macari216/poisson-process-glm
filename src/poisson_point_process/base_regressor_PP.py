@@ -15,9 +15,8 @@ import jax.numpy as jnp
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from nemos import utils
+from  nemos import utils
 from nemos.base_class import Base
-from nemos.solvers._abstract_solver import SolverState, StepResult
 from nemos.typing import (
     DESIGN_INPUT_TYPE,
     # RegularizerStrength,
@@ -477,7 +476,7 @@ class BaseRegressor(Base, abc.ABC):
         y: jnp.ndarray,
         *args,
         **kwargs,
-    ) -> StepResult:
+    ):
         """Run a single update step of the underlying solver."""
         pass
 
@@ -498,7 +497,7 @@ class BaseRegressor(Base, abc.ABC):
         y: jnp.ndarray,
         init_params,
         cast_to_jax_and_drop_nans: bool = True,
-    ) -> SolverState:
+    ):
         """Initialize the state of the solver for running fit and update."""
         pass
 
