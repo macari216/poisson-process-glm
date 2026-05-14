@@ -8,13 +8,13 @@ import lazy_loader as lazy
 import optimistix as optx
 from packaging.version import Version
 
-from nemos.typing import Aux, Params
+from nemos.typing import Params
 
 if TYPE_CHECKING:
     from ..regularizer_PP import Regularizer
 
-from nemos.solvers._abstract_solver import OptimizationInfo, SolverAdapterState
-from nemos.solvers._aux_helpers import (
+from nemos.solvers._abstract_solver import OptimizationInfo
+from ._aux_helpers import (
     convert_fn,
     drop_aux,
     pack_args,
@@ -32,14 +32,6 @@ DEFAULT_RTOL = 0.0
 DEFAULT_MAX_STEPS = 10_000
 
 OptimistixSolverState: TypeAlias = eqx.Module
-
-
-class OptimistixAdapterState(SolverAdapterState[OptimistixSolverState]):
-    """Solver state for Optimistix-based adapters."""
-
-
-OptimistixStepResult: TypeAlias = tuple[Params, OptimistixAdapterState, Aux]
-
 
 @dataclasses.dataclass
 class OptimistixConfig:
@@ -65,7 +57,7 @@ class OptimistixConfig:
     adjoint: optx.AbstractAdjoint = optx.ImplicitAdjoint()
 
 
-class OptimistixAdapter(SolverAdapter[OptimistixAdapterState]):
+class OptimistixAdapter(SolverAdapter[OptimistixSolverState]):
     """
     Base class for adapters wrapping Optimistix minimizers.
 
@@ -107,12 +99,11 @@ class OptimistixAdapter(SolverAdapter[OptimistixAdapterState]):
         if self._proximal:
             loss_fn = unregularized_loss
             self.regularizer_strength = regularizer_strength
-            self.prox = regularizer.get_proximal_operator(
-                params=init_params, strength=regularizer_strength
-            )
+            self.prox = regularizer.get_proximal_operator()
+
         else:
             loss_fn = regularizer.penalized_loss(
-                unregularized_loss, params=init_params, strength=regularizer_strength
+                unregularized_loss, regularizer_strength=regularizer_strength
             )
 
         # take out the arguments that go into minimise, init, terminate and so on
@@ -144,7 +135,7 @@ class OptimistixAdapter(SolverAdapter[OptimistixAdapterState]):
             **solver_init_kwargs,
         )
 
-    def init_state(self, init_params: Params, *args: Any) -> OptimistixAdapterState:
+    def init_state(self, init_params: Params, *args: Any) -> OptimistixSolverState:
         init_params = tree_map_inexact_asarray(init_params)
         fn = convert_fn(self.fun_with_aux, True, init_params, args)
         f_struct, aux_struct = fn.out_struct
@@ -164,14 +155,15 @@ class OptimistixAdapter(SolverAdapter[OptimistixAdapterState]):
             converged=jax.numpy.array(False),  # pyright: ignore
             reached_max_steps=jax.numpy.array(False),
         )
-        return OptimistixAdapterState(solver_state=solver_state, stats=stats)
+        # return OptimistixSolverState(solver_state=solver_state, stats=stats)
+        return solver_state
 
     def update(
         self,
         params: Params,
-        state: OptimistixAdapterState,
+        state: OptimistixSolverState,
         *args: Any,
-    ) -> OptimistixStepResult:
+    ):
         params = tree_map_inexact_asarray(params)
 
         fn = convert_fn(self.fun_with_aux, True, params, args)
@@ -185,15 +177,15 @@ class OptimistixAdapter(SolverAdapter[OptimistixAdapterState]):
             tags=self.config.tags,
         )
         num_steps = state.stats.num_steps + 1
-        stats = self._get_optim_info(solver_state, num_steps=num_steps)
-        state = OptimistixAdapterState(solver_state=solver_state, stats=stats)
+        stats = self.get_optim_info(solver_state, num_steps=num_steps)
+        # state = OptimistixAdapterState(solver_state=solver_state, stats=stats)
         return new_params, state, aux
 
     def run(
         self,
         init_params: Params,
         *args: Any,
-    ) -> OptimistixStepResult:
+    ):
         solution = optx.minimise(
             fn=self.fun_with_aux,
             solver=self._solver,
@@ -206,11 +198,11 @@ class OptimistixAdapter(SolverAdapter[OptimistixAdapterState]):
             throw=self.config.throw,
             tags=self.config.tags,
         )
-        stats = self._get_optim_info(
+        stats = self.get_optim_info(
             solution.state, num_steps=solution.stats["num_steps"]
         )
-        state = OptimistixAdapterState(solver_state=solution.state, stats=stats)
-        return solution.value, state, solution.aux
+        # state = OptimistixAdapterState(solver_state=solution.state, stats=stats)
+        return solution.value, solution.state, solution.aux
 
     @classmethod
     def get_accepted_arguments(cls) -> set[str]:
@@ -238,7 +230,7 @@ class OptimistixAdapter(SolverAdapter[OptimistixAdapterState]):
     def maxiter(self) -> int:
         return self.config.maxiter
 
-    def _get_optim_info(
+    def get_optim_info(
         self,
         state: OptimistixSolverState,
         num_steps: jax.numpy.ndarray = jax.numpy.array(0),

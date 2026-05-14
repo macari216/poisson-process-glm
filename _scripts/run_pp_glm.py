@@ -14,19 +14,17 @@ from poisson_point_process.basis import GenLaguerreEval, GenLaguerreInt, GenLagu
 from poisson_point_process.poisson_process_glm import ContinuousPA, ContinuousMC
 from poisson_point_process.poisson_process_obs_model import PolynomialApproximation, MonteCarloApproximation
 
-import matplotlib.pyplot as plt
-
 jax.config.update("jax_enable_x64", True)
 
 #### EXAMPLE CODE FOR FITTING A SINGLE POSTSYNAPTIC NEURON
-#### SIMULATION SIZE AND OPTIMIZATION PARAMS ARE CHOSEN TO BE FEASIBLE ON CPU
+#### SIMULATION SIZE AND OPTIMIZATION PARAMS ARE CHOSEN TO BE FEASIBLE ON CPU (MIGHT NOT CONVERGE)
 
 # jax will prefer GPU if available
 print("JAX is using:", jax.default_backend())
 
 ## generate data from all-to-one coupled GLM
 n_neurons = 8
-sim_time = 500
+sim_time = 200
 history_window = 0.005
 # required for simulation
 binsize = 0.00005
@@ -52,22 +50,22 @@ np.random.seed(216)
 
 #set generative model parameters
 # baseline firing rate in Hz
-pres_rate_hz = 5
+pres_rate_hz = jnp.array(np.abs(np.random.normal(5, 2, n_neurons)))
 posts_rate_hz = 2
+pres_rate_per_bin = pres_rate_hz * binsize
 
 # inverse firing rate per bin
 bias_true = phi_inverse(posts_rate_hz * binsize)
 # generative weights
-weights_true = np.random.normal(-0.2, 0.5, n_neurons * n_basis_funcs)
+weights_true = jnp.array(np.random.normal(-0.2, 0.5, n_neurons * n_basis_funcs))
 
 # true filters in Hz
 filters_true = phi(np.dot(weights_true.reshape(-1,n_basis_funcs), kernels.T) + bias_true) / binsize
 
 # step 1: simulate counts
 # post- and presynaptic spike counts and postsynaptic firing rates per bin
-_, y_counts, X_counts, rates = simulate.poisson_counts(pres_rate_hz, bias_true, binsize,
-                                                           n_bins_tot, n_neurons, weights_true, window_size, kernels,
-                                                           phi)
+_, y_counts, X_counts, rates = simulate.poisson_counts(pres_rate_per_bin, bias_true, n_bins_tot, n_neurons,
+                                                           weights_true, window_size, kernels, phi)
 
 # step 2: convert to spike times
 spike_times, spike_ids = simulate.poisson_times(X_counts, sim_time, binsize)
@@ -113,7 +111,6 @@ model_pa = ContinuousPA(
     approx_interval=approx_interval,
     recording_time=nap.IntervalSet(0, sim_time),
     reset_suff_stats=True,
-    solver_kwargs={"tol":1e-12}
 ).fit_closed_form(X_spikes, y_spikes)
 time_pa = perf_counter() - tt0
 print(f"PA-c fit time: {time_pa}")
@@ -149,7 +146,7 @@ model_mc = ContinuousMC(
     recording_time=nap.IntervalSet(0, sim_time),
     inverse_link_function=phi,
     random_key=jax.random.PRNGKey(0),
-    solver_kwargs={"stepsize": 1e-4}
+    solver_kwargs={"stepsize": 1e-4, "tol": 1e-3, "maxiter": 50}
     )
 
 tt0 = perf_counter()
@@ -174,7 +171,7 @@ model_h = ContinuousMC(
     inverse_link_function=phi,
     recording_time=nap.IntervalSet(0, sim_time),
     random_key=jax.random.PRNGKey(0),
-    solver_kwargs={"stepsize": 1e-4}
+    solver_kwargs={"stepsize": 1e-4, "tol": 1e-3, "maxiter": 50}
 )
 
 tt0 = perf_counter()

@@ -22,7 +22,7 @@ classifiers = [
 
 # Define dependencies for the project
 dependencies = [
-    "nemos"
+    "nemos==0.2.5"
 ]
 
 
