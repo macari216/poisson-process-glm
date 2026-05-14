@@ -5,29 +5,32 @@ import pynapple as nap
 import nemos as nmo
 from scipy.optimize import bisect
 
-def poisson_counts(mean_per_sec, bias_posts, binsize, n_bins_tot, n_pres, weights_true, ws, basis, nonlin, seed=216):
-    n_bins_tot += ws
+def poisson_counts(
+        pres_rate_per_bin, bias_posts, n_bins_tot, n_pres, weights_true,
+                   window_size, basis_kernels, phi, seed=216
+):
+    n_bins_tot += window_size
 
     np.random.seed(seed)
-    lam_pres = np.abs(np.random.normal(mean_per_sec, mean_per_sec/10, n_pres))
 
     weights_true = jnp.array(weights_true)
     bias_posts = jnp.array(bias_posts)
 
-    rate_per_bin = lam_pres * binsize
-    pres_spikes = jnp.array(np.random.poisson(lam=rate_per_bin, size=(n_bins_tot, n_pres)))
+    pres_spikes = jnp.array(np.random.poisson(lam=pres_rate_per_bin, size=(n_bins_tot, n_pres)))
 
-    X = nmo.convolve.create_convolutional_predictor(basis, jnp.array(pres_spikes)).reshape(n_bins_tot, -1)
-    X = X[ws:]
-    lam_posts = nonlin(np.dot(X, weights_true) + bias_posts)
+    X = nmo.convolve.create_convolutional_predictor(basis_kernels, jnp.array(pres_spikes)).reshape(n_bins_tot, -1)
+    X = X[window_size:]
+    lam_posts = phi(np.dot(X, weights_true) + bias_posts)
     posts_spikes = jnp.array(np.random.poisson(lam=lam_posts, size=len(lam_posts)))
 
-    return X, posts_spikes, jnp.array(pres_spikes)[ws:], lam_posts
+    return X, posts_spikes, jnp.array(pres_spikes)[window_size:], lam_posts
 
-def poisson_counts_recurrent(n_bins_tot, n_neurons, window_size, basis_kernels, params, inv_link, init_spikes=None, seed=123):
+def poisson_counts_recurrent(n_bins_tot, n_neurons, window_size, basis_kernels, params, inv_link,
+                             feedforward_input=None, feedforward_coef=None, init_spikes=None, seed=123):
     # parameters for simulator
-    feedforward_input = np.zeros((n_bins_tot, n_neurons, 1))
-    feedforward_coef = np.zeros((n_neurons, 1))
+    if feedforward_input is None:
+        feedforward_input = np.zeros((n_bins_tot, n_neurons, 1))
+        feedforward_coef = np.zeros((n_neurons, 1))
     if init_spikes is None:
         init_spikes = np.zeros((window_size, n_neurons))
     random_key = jax.random.key(seed)

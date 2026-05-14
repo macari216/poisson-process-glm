@@ -219,7 +219,7 @@ class BaseRegressor(Base, abc.ABC):
         else:
             raise TypeError(
                 f"The regularizer should be either a string from "
-                f"{AVAILABLE_REGULARIZERS} or an instance of `nemos.regularizer.Regularizer`"
+                f"{AVAILABLE_REGULARIZERS} or an instance of `poisson_point_process.regularizer_PP.Regularizer`"
             )
 
         # force check of regularizer_strength
