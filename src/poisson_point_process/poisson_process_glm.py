@@ -75,7 +75,7 @@ class ContinuousMC(BaseRegressor):
 
         """
         # check params has length two
-        validation.check_length(params, 3, "Params must have length three.")
+        validation.check_length(params, 2, "Params must have length two.")
         # convert to jax array (specify type if needed)
         params = validation.convert_tree_leaves_to_jax_array(
             params,
@@ -100,16 +100,7 @@ class ContinuousMC(BaseRegressor):
             raise ValueError(
                 "Intercept term should be a single valued one-dimensional array."
             )
-        # check the dimensionality of random key
-        validation.check_tree_leaves_dimensionality(
-            params[2],
-            expected_dim=1,
-            err_message="params[2] must be of shape (2,)"
-        )
-        if params[2].shape[0] != 2:
-            raise ValueError(
-                "Random key must be a jax.random.PRNGKey() array."
-            )
+
         return params
 
     @staticmethod
@@ -255,7 +246,6 @@ class ContinuousMC(BaseRegressor):
         init_params = (
             jnp.zeros(n_neurons * self.observation_model.n_basis_funcs),
             initial_intercept,
-            self.random_key.astype(jnp.float64)
         )
         return init_params
 
@@ -272,6 +262,7 @@ class ContinuousMC(BaseRegressor):
             init_params = init_params
             # if len(init_params)==2:
             #     init_params = init_params + (self.random_key.astype(jnp.float64),)
+
 
             err_message = "Initial parameters must be array-like objects (or pytrees of array-like objects) "
             "with numeric data-type!"
@@ -362,7 +353,8 @@ class ContinuousMC(BaseRegressor):
 
         self.initialize_state(X, y, init_params)
 
-        params, state = self._solver_run(init_params, data, y)
+        init_params_with_key = self._params_add_key(init_params)
+        params, state = self._solver_run(init_params_with_key, data, y)
 
         if tree_utils.pytree_map_and_reduce(
                 lambda x: jnp.any(jnp.isnan(x)), any, params
@@ -402,10 +394,10 @@ class ContinuousMC(BaseRegressor):
         self._check_input_dimensionality(X, y)
 
         # perform a one-step update
-        params = self._params_add_key(params)
-        params, opt_state, aux = self._solver_update(params, opt_state, data, y, *args, **kwargs)
-        params = params[:-1]
-        self.random_key = params[-1]
+        params_with_key = self._params_add_key(params)
+        params_with_key, opt_state, aux = self._solver_update(params_with_key, opt_state, data, y, *args, **kwargs)
+        params = params_with_key[:-1]
+        self.random_key = params_with_key[-1]
 
         if tree_utils.pytree_map_and_reduce(
                 lambda x: jnp.any(jnp.isnan(x)), any, params
@@ -586,7 +578,7 @@ class PopulationContinuousMC(ContinuousMC):
 
         """
         # check params has length two
-        validation.check_length(params, 3, "Params must have length three.")
+        validation.check_length(params, 2, "Params must have length two.")
         # convert to jax array (specify type if needed)
         params = validation.convert_tree_leaves_to_jax_array(
             params,
@@ -617,16 +609,7 @@ class PopulationContinuousMC(ContinuousMC):
                 f"The intercept assumes {params[1].shape[0]} neurons, "
                 f"the coefficients {params[0].shape[1]} instead!"
             )
-        # check the dimensionality of random key
-        validation.check_tree_leaves_dimensionality(
-            params[2],
-            expected_dim=1,
-            err_message="params[2] must be of shape (2,)"
-        )
-        if params[2].shape[0] != 2:
-            raise ValueError(
-                "Random key must be a jax.random.PRNGKey() array."
-            )
+
         return params
 
     @staticmethod
@@ -692,7 +675,6 @@ class PopulationContinuousMC(ContinuousMC):
         init_params = (
             jnp.zeros((n_features, n_neurons)),
             initial_intercept,
-            self.random_key.astype(jnp.float64)
         )
         return init_params
 
