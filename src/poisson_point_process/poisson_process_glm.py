@@ -194,6 +194,9 @@ class ContinuousMC(BaseRegressor):
         self.coef_: DESIGN_INPUT_TYPE = params[0]
         self.intercept_: jnp.ndarray = params[1]
 
+    def _params_add_key(self, init_params):
+        return init_params + (self.random_key.astype(jnp.float64),)
+
     def _predict_and_compute_loss(
             self,
             params_with_key: Dict,
@@ -266,8 +269,9 @@ class ContinuousMC(BaseRegressor):
         if init_params is None:
             init_params = self._initialize_parameters(X, y)  # initialize
         else:
-            if len(init_params)==2:
-                init_params = init_params + (self.random_key.astype(jnp.float64),)
+            init_params = init_params
+            # if len(init_params)==2:
+            #     init_params = init_params + (self.random_key.astype(jnp.float64),)
 
             err_message = "Initial parameters must be array-like objects (or pytrees of array-like objects) "
             "with numeric data-type!"
@@ -329,7 +333,8 @@ class ContinuousMC(BaseRegressor):
         opt_solver_kwargs = self._optimize_solver_params(data, y)
 
         self.instantiate_solver(solver_kwargs=opt_solver_kwargs)
-        opt_state = self._solver_init_state(init_params, data, y)
+        init_params_with_key = self._params_add_key(init_params)
+        opt_state = self._solver_init_state(init_params_with_key, data, y)
 
         return opt_state
 
@@ -381,7 +386,7 @@ class ContinuousMC(BaseRegressor):
             y: jnp.ndarray,
             *args,
             **kwargs,
-    ) -> jaxopt.OptStep:
+    ) -> Tuple:
         """Run a single update step of the jaxopt solver."""
         # set data dependent parameters
         self._initialize_data_params(X, y)
@@ -397,10 +402,13 @@ class ContinuousMC(BaseRegressor):
         self._check_input_dimensionality(X, y)
 
         # perform a one-step update
-        opt_step = self._solver_update(params, opt_state, data, y, *args, **kwargs)
+        params = self._params_add_key(params)
+        params, opt_state, aux = self._solver_update(params, opt_state, data, y, *args, **kwargs)
+        params = params[:-1]
+        self.random_key = params[-1]
 
         if tree_utils.pytree_map_and_reduce(
-                lambda x: jnp.any(jnp.isnan(x)), any, opt_step[0]
+                lambda x: jnp.any(jnp.isnan(x)), any, params
         ):
             raise ValueError(
                 "Solver returned at least one NaN parameter, so solution is invalid!"
@@ -409,10 +417,10 @@ class ContinuousMC(BaseRegressor):
             )
 
         # store params and state
-        self._set_coef_and_intercept(opt_step[0])
-        self.solver_state_ = opt_step[1]
+        self._set_coef_and_intercept(params)
+        self.solver_state_ = opt_state
 
-        return opt_step
+        return params, opt_state
 
     def _get_optimal_solver_params_config(self):
         """Return the functions for computing default step and batch size for the solver."""

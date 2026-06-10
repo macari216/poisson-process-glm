@@ -174,7 +174,6 @@ class MonteCarloApproximation(Observations):
     ):
         weights, bias = params
         weights = utils.reshape_w(weights, self.n_basis_funcs)
-        n_target = weights.shape[-1]
 
         def scan_fn(lam_s, i):
             spk_in_window = utils.slice_array(
